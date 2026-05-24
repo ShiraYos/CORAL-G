@@ -34,45 +34,35 @@ class ObjectAvoidanceNode(Node):
             10
         )
 
-        self.safe_distance = 0.4      # meters - stop if obstacle closer than this
-        self.front_angle_deg = 25     # degrees - cone in front of robot to check
+        self.safe_distance = 0.4
+        self.front_angle_deg = 25
 
         self.get_logger().info('Object Avoidance Node started')
 
     def lidar_callback(self, msg: LaserScan):
 
-        # Get distances in front arc
         front_distances = self.get_front_arc_distances(msg, self.front_angle_deg)
 
-        # Filter out invalid readings
+        # Only filter inf and nan - remove range_max check
+        # When too close, readings go to 0 or inf - both mean obstacle
         valid_ranges = [
             r for r in front_distances
-            if math.isfinite(r) and msg.range_min < r < msg.range_max
+            if math.isfinite(r) and r > msg.range_min
         ]
 
-        # If no valid readings, stop for safety
+        # If no valid readings - assume obstacle and turn
         if not valid_ranges:
-            self.get_logger().warn('No valid front range readings - stopping')
-            self.publish_cmd(0.0, 0.0)
+            self.get_logger().warn('No valid readings - assuming obstacle, turning')
+            self.publish_cmd(0.0, 1.0)
             return
 
         min_front = min(valid_ranges)
 
-        twist_msg = TwistStamped()
-        twist_msg.header.stamp = self.get_clock().now().to_msg()
-        twist_msg.header.frame_id = 'base_link'
-
         if min_front < self.safe_distance:
-            # Obstacle detected - turn left until clear
-            self.get_logger().info(f'Obstacle detected at {min_front:.2f}m - turning')
-            twist_msg.twist.linear.x = 0.0
-            twist_msg.twist.angular.z = 0.6
+            self.get_logger().info(f'Obstacle at {min_front:.2f}m - turning')
+            self.publish_cmd(0.0, 1.0)
         else:
-            # Path clear - move forward
-            twist_msg.twist.linear.x = 0.2
-            twist_msg.twist.angular.z = 0.0
-
-        self.publisher.publish(twist_msg)
+            self.publish_cmd(0.2, 0.0)
 
     def publish_cmd(self, linear: float, angular: float):
         twist_msg = TwistStamped()
