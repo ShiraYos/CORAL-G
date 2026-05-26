@@ -29,6 +29,7 @@ setup(
             'subscriber_node = my_tb3_world.subscriber_node:main',
             'objectAvoidance_node = my_tb3_world.objectAvoidance_node:main',
             'goal_navigation_node = my_tb3_world.goal_navigation_node:main',
+            'stateSync_node = my_tb3_world.stateSync_node:main',
         ],
     },
 )
