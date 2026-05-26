@@ -30,6 +30,7 @@ setup(
             'objectAvoidance_node = my_tb3_world.objectAvoidance_node:main',
             'goal_navigation_node = my_tb3_world.goal_navigation_node:main',
             'stateSync_node = my_tb3_world.stateSync_node:main',
+            'twin_input_node = my_tb3_world.twin_input_node:main',
         ],
     },
 )

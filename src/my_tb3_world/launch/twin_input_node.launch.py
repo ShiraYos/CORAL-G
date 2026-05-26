@@ -6,14 +6,14 @@ def generate_launch_description():
     return LaunchDescription([
         Node(
             package='my_tb3_world',
-            executable='stateSync_node',
-            name='stateSync_node',
+            executable='twin_input_node',
+            name='twin_input_node',
             output='screen',
             parameters=[{
-                'storage_capacity_items': 3,
-                'fuel_drain_rate': 0.05,
-                'fuel_low_threshold': 20.0,
-                'base_radius_m': 0.5,
+                'cell_size_m': 1.0,
+                'tick_rate_hz': 1.0,
+                'zone_width_m': 7.0,
+                'zone_height_m': 7.0,
             }]
         )
     ])
