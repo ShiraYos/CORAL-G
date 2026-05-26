@@ -1,0 +1,5 @@
+string reason
+int64 random_seed
+---
+bool accepted
+string message

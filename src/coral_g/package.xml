@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>coral_g</name>
+  <version>0.1.0</version>
+  <description>CORAL-G ROS 2 digital twin proof-of-concept nodes.</description>
+  <maintainer email="team@example.com">CORAL-G Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>python3</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>coral_g_interfaces</exec_depend>
+  <test_depend>pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
