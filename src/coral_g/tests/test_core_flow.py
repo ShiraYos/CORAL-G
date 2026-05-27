@@ -16,7 +16,7 @@ from coral_g.core import (
 
 def _ready_twin():
     fusion = DigitalTwinFusion()
-    fusion.set_environment(default_environment())
+    fusion.set_environment(default_environment(width_m=8, height_m=10, cell_size_m=0.5, x_min=-1.75, y_min=-3.75))
     fusion.set_map_update(fallback_map_update(scan_seen=True))
     fusion.set_material_distribution(MaterialBelief().message())
     return fusion.message()
@@ -27,6 +27,7 @@ class CoreFlowTests(unittest.TestCase):
         twin = _ready_twin()
         density_a = simulate_density(twin, seed=23)
         density_b = simulate_density(twin, seed=23)
+        self.assertEqual(len(density_a["density_cells"]), 3)
         self.assertEqual(density_a["density_cells"], density_b["density_cells"])
         blocked = {(cell["x"], cell["y"]) for cell in twin["map"]["blocked_cells"]}
         self.assertTrue(blocked.isdisjoint({(cell["x"], cell["y"]) for cell in density_a["density_cells"]}))
@@ -44,6 +45,28 @@ class CoreFlowTests(unittest.TestCase):
 
         remaining = {(cell["x"], cell["y"]) for cell in updated_density["density_cells"]}
         self.assertNotIn((first_cell["x"], first_cell["y"]), remaining)
+
+    def test_planner_returns_to_base_after_all_targets_are_collected_then_idles(self):
+        fusion = DigitalTwinFusion()
+        fusion.set_environment(default_environment(width_m=8, height_m=10, cell_size_m=0.5, x_min=-1.75, y_min=-3.75))
+        fusion.set_map_update(fallback_map_update(scan_seen=True))
+        fusion.set_material_distribution(MaterialBelief().message())
+        initial_density = simulate_density(fusion.message(), seed=23)
+        for cell in initial_density["density_cells"]:
+            fusion.add_collection_report(make_collection_report(cell, "plastic", 1))
+
+        empty_density = simulate_density(fusion.message(), seed=23)
+        self.assertEqual(empty_density["density_cells"], [])
+
+        away_robot = make_robot_state(x=0.75, y=-1.75, fuel_level=1.0, storage_fill=0.25)
+        return_decision = plan_next_cell(fusion.message(), empty_density, away_robot, DEFAULT_FIELD_POLICY, DEFAULT_RETURN_POLICY)
+        self.assertEqual(return_decision["mode"], "return_to_base")
+        self.assertEqual(return_decision["reason"], "all_debris_collected_return_to_base")
+
+        base_robot = make_robot_state(x=0.0, y=0.0, fuel_level=1.0, storage_fill=0.0)
+        idle_decision = plan_next_cell(fusion.message(), empty_density, base_robot, DEFAULT_FIELD_POLICY, DEFAULT_RETURN_POLICY)
+        self.assertEqual(idle_decision["mode"], "idle")
+        self.assertEqual(idle_decision["reason"], "mission_complete")
 
     def test_planner_selects_cleanup_cell_when_resources_are_ok(self):
         twin = _ready_twin()

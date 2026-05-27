@@ -160,15 +160,12 @@ probability(material) = count(material) / total_collected_count
 
 **Debris target model:**
 
-The PoC uses a finite list of separated debris targets inside the small Nav2 map instead of making every grid cell look like possible trash:
+The PoC uses a finite list of three separated debris targets inside the small Nav2 map instead of making every grid cell look like possible trash:
 
 ```text
-(1.5, -3.5)
-(-1.5, -3.0)
-(1.5, -2.0)
-(-1.5, -1.5)
-(1.0, -0.5)
-(-1.0, 0.5)
+(0.75, -0.75)
+(-0.75, -0.75)
+(0.75, -1.75)
 ```
 
 For each target, the node finds the nearest valid environment cell and publishes it as a debris-density cell. A small deterministic random jitter is added to the configured density, so the output stays deterministic for the same random seed but still has varied scores.
@@ -308,7 +305,9 @@ return_reserve = 0.2
 
 - `cleanup_cell`: go to the highest-utility remaining cleanup cell.
 - `return_to_base`: go back to base because fuel/storage thresholds require it.
-- `idle`: no valid goal is available yet, or all debris targets have been collected.
+- `idle`: no valid goal is available yet, or all debris targets have been collected and the robot is already back at base.
+
+When all debris targets have been collected and the robot is not at base yet, the planner publishes a final `return_to_base` decision with reason `all_debris_collected_return_to_base`. Once that return succeeds and the robot is near base, the planner idles with reason `mission_complete`.
 
 ## `mission_planner_node`
 

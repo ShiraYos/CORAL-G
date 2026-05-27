@@ -33,9 +33,6 @@ DEFAULT_DEBRIS_TARGETS = (
     {"x": 0.75, "y": -0.75, "density": 1.2, "material_hint": "plastic"},
     {"x": -0.75, "y": -0.75, "density": 1.15, "material_hint": "foam"},
     {"x": 0.75, "y": -1.75, "density": 1.45, "material_hint": "rubber"},
-    {"x": -0.75, "y": -1.75, "density": 1.3, "material_hint": "metal"},
-    {"x": 0.75, "y": -2.75, "density": 1.35, "material_hint": "plastic"},
-    {"x": -0.75, "y": -2.75, "density": 1.25, "material_hint": "unknown"},
 )
 
 
@@ -285,14 +282,28 @@ def plan_next_cell(
     robot_pose = robot_state.get("pose", pose())
     fuel = float(robot_state.get("fuel_level", 1.0))
     storage = float(robot_state.get("storage_fill", 0.0))
+    if not density_map.get("density_cells"):
+        return_cost = distance(robot_pose, base)
+        if return_cost > 0.5:
+            return _planner_message(
+                "ready",
+                "return_to_base",
+                base,
+                0.0,
+                0.0,
+                0.0,
+                return_cost,
+                fuel,
+                "normal",
+                "all_debris_collected_return_to_base",
+            )
+        return _planner_message("ready", "idle", base, 0.0, 0.0, 0.0, 0.0, fuel, "normal", "mission_complete")
     if fuel <= float(return_policy.get("fuel", 0.25)):
         return _planner_message("ready", "return_to_base", base, 0.0, 0.0, 0.0, distance(robot_pose, base), fuel, "critical", "fuel_below_return_threshold")
     if storage >= float(return_policy.get("storage", 0.8)):
         return _planner_message("ready", "return_to_base", base, 0.0, 0.0, 0.0, distance(robot_pose, base), fuel, "full", "storage_above_return_threshold")
 
     blocked = {cell_key(c) for c in twin_state.get("map", {}).get("blocked_cells", [])}
-    if not density_map.get("density_cells"):
-        return _planner_message("ready", "idle", base, 0.0, 0.0, 0.0, 0.0, fuel, "normal", "all_debris_collected")
     collected_locations = [
         update.get("location", {})
         for update in twin_state.get("collection_updates", [])
