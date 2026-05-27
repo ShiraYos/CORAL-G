@@ -276,6 +276,7 @@ class MissionPlannerNode(Node):
         super().__init__("mission_planner_node")
         self.robot_state: Optional[Dict[str, Any]] = None
         self.navigation_status = "waiting_for_nav2"
+        self.last_goal_key = None
         self.publisher = self.create_publisher(PoseStamped, TOPICS["goal_pose"], 10)
         self.create_subscription(
             String,
@@ -296,11 +297,23 @@ class MissionPlannerNode(Node):
 
     def _nav_status_callback(self, message: String) -> None:
         self.navigation_status = message.data
+        if message.data in ("succeeded", "failed", "timeout", "waiting_for_nav2"):
+            self.last_goal_key = None
 
     def _goal_callback(self, message: Dict[str, Any]) -> None:
         if message.get("status") != "ready" or message.get("mode") == "idle":
             return
+        if self.navigation_status in ("received", "active"):
+            return
         target = DEFAULT_RETURN_POLICY["base"] if message.get("mode") == "return_to_base" else message.get("cell", {})
+        goal_key = (
+            message.get("mode"),
+            round(float(target.get("x", 0.0)), 2),
+            round(float(target.get("y", 0.0)), 2),
+            round(float(target.get("heading", 0.0)), 2),
+        )
+        if goal_key == self.last_goal_key:
+            return
         goal = PoseStamped()
         goal.header.frame_id = "map"
         goal.pose.position.x = float(target.get("x", 0.0))
@@ -311,6 +324,7 @@ class MissionPlannerNode(Node):
         goal.pose.orientation.y = q["y"]
         goal.pose.orientation.z = q["z"]
         goal.pose.orientation.w = q["w"]
+        self.last_goal_key = goal_key
         self.publisher.publish(goal)
 
 

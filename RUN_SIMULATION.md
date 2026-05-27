@@ -352,13 +352,15 @@ header:
 
 `goal_navigation_node` remembers pending, active, and just-completed goal poses. It ignores duplicate goals so Nav2 is not preempted every second by the same target.
 
+`mission_planner_node` also locks onto the current target while navigation is `received` or `active`. This prevents the utility planner from switching to a different trash cell mid-drive just because the robot moved and travel costs changed.
+
 If Nav2 logs repeated:
 
 ```text
 Received goal preemption request
 ```
 
-then duplicate suppression is not active or old CORAL-G code is running.
+then duplicate suppression or mission goal locking is not active, or old CORAL-G code is running.
 
 ### Finite Trash Targets
 
@@ -455,4 +457,3 @@ Terminal 3: exit monitor shell
 ```
 
 The Docker container was started with `--rm`, so it is removed automatically when Terminal 1 exits.
-
