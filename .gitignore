@@ -5,3 +5,9 @@ __pycache__/
 *.pyc
 *.Zone.Identifier
 .vscode/
+
+# Local simulation runbooks and generated/context artifacts
+RUN_SIMULATION.md
+CORAL_G_RUN_AND_RESET_GUIDE.md
+CORAL_G_RUN_AND_RESET_GUIDE.pdf
+coral-g-full-context.md
