@@ -29,6 +29,7 @@ setup(
             "goal_navigation_node = coral_g.ros_nodes:goal_navigation_main",
             "collection_report_node = coral_g.ros_nodes:collection_report_main",
             "demo_control_surface = coral_g.ros_nodes:demo_control_main",
+            "initial_pose_publisher = coral_g.ros_nodes:initial_pose_main",
             "contract_check = coral_g.contract_check:main",
         ],
     },

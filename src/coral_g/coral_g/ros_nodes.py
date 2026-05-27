@@ -1,8 +1,10 @@
 import json
+import math
+import time
 from typing import Any, Callable, Dict, Optional
 
 import rclpy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
@@ -529,3 +531,42 @@ def collection_report_main() -> None:
 
 def demo_control_main() -> None:
     _spin(DemoControlSurface)
+
+
+def initial_pose_main() -> None:
+    rclpy.init()
+    node = Node("initial_pose_publisher")
+    node.declare_parameter("x", 0.0)
+    node.declare_parameter("y", 0.0)
+    node.declare_parameter("yaw", 0.0)
+    node.declare_parameter("publish_count", 10)
+    node.declare_parameter("publish_period_sec", 0.5)
+    publisher = node.create_publisher(PoseWithCovarianceStamped, "/initialpose", 10)
+
+    x = float(node.get_parameter("x").value)
+    y = float(node.get_parameter("y").value)
+    yaw = float(node.get_parameter("yaw").value)
+    publish_count = int(node.get_parameter("publish_count").value)
+    publish_period_sec = float(node.get_parameter("publish_period_sec").value)
+    half_yaw = yaw * 0.5
+
+    message = PoseWithCovarianceStamped()
+    message.header.frame_id = "map"
+    message.pose.pose.position.x = x
+    message.pose.pose.position.y = y
+    message.pose.pose.position.z = 0.0
+    message.pose.pose.orientation.z = math.sin(half_yaw)
+    message.pose.pose.orientation.w = math.cos(half_yaw)
+    message.pose.covariance[0] = 0.25
+    message.pose.covariance[7] = 0.25
+    message.pose.covariance[35] = 0.0685
+
+    try:
+        for _ in range(max(1, publish_count)):
+            publisher.publish(message)
+            rclpy.spin_once(node, timeout_sec=0.1)
+            time.sleep(max(0.1, publish_period_sec))
+        node.get_logger().info(f"published initial pose x={x:.2f} y={y:.2f} yaw={yaw:.2f}")
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()

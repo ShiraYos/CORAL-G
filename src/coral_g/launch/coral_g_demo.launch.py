@@ -4,6 +4,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     node_names = [
+        "initial_pose_publisher",
         "twin_input_node",
         "material_belief_node",
         "digital_twin_state",

@@ -83,13 +83,13 @@ docker build -t turtlebot3_ws .
 
 ## Terminal Layout
 
-Use four WSL terminals:
+Use three WSL terminals for the normal flow, plus an optional fourth monitor terminal:
 
 ```text
 Terminal 1: Docker container + Gazebo
 Terminal 2: Nav2
-Terminal 3: Initial pose + monitoring
-Terminal 4: CORAL-G nodes
+Terminal 3: CORAL-G nodes
+Terminal 4: Optional monitoring/debug commands
 ```
 
 Do not use the Gazebo reset button during the demo. It can remove or desync the spawned TurtleBot. Restart the Gazebo launch instead.
@@ -152,49 +152,9 @@ Expected:
 
 Keep this terminal running.
 
-## Terminal 3: Set Initial Pose
+## Terminal 3: Launch CORAL-G
 
 Open a third WSL terminal:
-
-```bash
-docker exec -it turtlebot3_container bash
-```
-
-Inside Docker:
-
-```bash
-cd /ws
-source /opt/ros/jazzy/setup.bash
-source /opt/turtlebot3_ws/install/setup.bash
-source install/setup.bash
-```
-
-Publish initial pose:
-
-```bash
-ros2 topic pub --once /initialpose geometry_msgs/msg/PoseWithCovarianceStamped "{header: {frame_id: map}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {z: 0.0, w: 1.0}}, covariance: [0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0685]}}"
-```
-
-Verify Nav2 action server:
-
-```bash
-ros2 action info /navigate_to_pose
-```
-
-Expected:
-
-```text
-Action servers: 1
-    /bt_navigator
-```
-
-Why this is needed:
-
-Nav2 uses the saved map frame. Gazebo knows the robot pose in simulation, but AMCL/Nav2 needs an initial map-frame pose to align `map -> odom`.
-
-## Terminal 4: Launch CORAL-G
-
-Open a fourth WSL terminal:
 
 ```bash
 docker exec -it turtlebot3_container bash
@@ -210,9 +170,12 @@ source install/setup.bash
 ros2 launch coral_g coral_g_demo.launch.py
 ```
 
+The CORAL-G launch starts `initial_pose_publisher`, which publishes `/initialpose` several times at startup. This replaces the manual long initial-pose command for the normal start position.
+
 Expected:
 
 - CORAL-G nodes start.
+- Nav2 receives the initial map-frame pose.
 - The robot begins moving through trash cells.
 - Demo report logs appear:
 
@@ -224,7 +187,22 @@ Keep this terminal running.
 
 ## Monitor Commands
 
-Run these in Terminal 3.
+Run these in an optional monitor terminal.
+
+Open another WSL terminal:
+
+```bash
+docker exec -it turtlebot3_container bash
+```
+
+Inside Docker:
+
+```bash
+cd /ws
+source /opt/ros/jazzy/setup.bash
+source /opt/turtlebot3_ws/install/setup.bash
+source install/setup.bash
+```
 
 ### Navigation Status
 
@@ -362,6 +340,19 @@ Received goal preemption request
 
 then duplicate suppression or mission goal locking is not active, or old CORAL-G code is running.
 
+### Automatic Initial Pose
+
+`coral_g_demo.launch.py` starts `initial_pose_publisher`, which publishes `/initialpose` for the normal start pose:
+
+```text
+x = 0.0
+y = 0.0
+yaw = 0.0
+frame_id = map
+```
+
+If Nav2 still asks for an initial pose, CORAL-G was probably launched before Nav2/AMCL was ready. Stop CORAL-G and launch it again after Nav2 is active.
+
 ### Finite Trash Targets
 
 The debris map is finite, not every cell. It is generated from `DEFAULT_DEBRIS_TARGETS` in:
@@ -450,10 +441,10 @@ CORAL-G contract check passed for 9 JSON contracts.
 Recommended shutdown order:
 
 ```text
-Terminal 4: Ctrl+C CORAL-G
+Terminal 3: Ctrl+C CORAL-G
 Terminal 2: Ctrl+C Nav2
 Terminal 1: Ctrl+C Gazebo
-Terminal 3: exit monitor shell
+Terminal 4: exit optional monitor shell
 ```
 
 The Docker container was started with `--rm`, so it is removed automatically when Terminal 1 exits.
