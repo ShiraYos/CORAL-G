@@ -2,6 +2,7 @@
 
 import math
 import time
+import threading
 
 import rclpy
 from geometry_msgs.msg import PoseStamped
@@ -30,69 +31,104 @@ class GoalNavigationNode(BasicNavigator):
         self.active_goal_started_at = None
         self.last_status = None
 
+        self.nav2_ready = False
+        self.pending_goal = None
+        self._lock = threading.Lock()
+
         self.status_publisher = self.create_publisher(
-            String,
-            "/coral_g/navigation_status",
-            10,
-        )
+            String, "/coral_g/navigation_status", 10)
+
         self.goal_subscription = self.create_subscription(
-            PoseStamped,
-            "/coral_g/goal_pose",
-            self.goal_callback,
-            10,
-        )
+            PoseStamped, "/coral_g/goal_pose", self.goal_callback, 10)
+
         self.status_timer = self.create_timer(0.5, self.check_navigation_status)
 
-        initial_pose = self.create_initial_pose()
+        # Wait for Nav2 in a background thread so spin() starts immediately
+        # and goals published during startup are queued rather than dropped
+        threading.Thread(target=self._init_nav2, daemon=True).start()
+
+    def _init_nav2(self):
+        initial_pose = self._make_pose(
+            self.get_float_parameter("initial_x"),
+            self.get_float_parameter("initial_y"),
+            self.get_float_parameter("initial_yaw"),
+        )
         self.setInitialPose(initial_pose)
         self.publish_status("waiting_for_nav2")
         self.waitUntilNav2Active(localizer="slam_toolbox")
+
+        with self._lock:
+            self.nav2_ready = True
+
         self.publish_status("ready")
+        self.get_logger().info("Nav2 active — ready to receive goals")
 
-    def create_initial_pose(self):
-        initial_x = self.get_float_parameter("initial_x")
-        initial_y = self.get_float_parameter("initial_y")
-        initial_yaw = self.get_float_parameter("initial_yaw")
+        # Send any goal that arrived before Nav2 was ready
+        with self._lock:
+            queued = self.pending_goal
+            self.pending_goal = None
 
+        if queued is not None:
+            self.get_logger().info("Sending queued goal that arrived during startup")
+            self._send_goal(queued)
+
+    def get_float_parameter(self, name):
+        return float(self.get_parameter(name).value)
+
+    def _make_pose(self, x, y, yaw) -> PoseStamped:
         pose = PoseStamped()
         pose.header.frame_id = "map"
         pose.header.stamp = self.get_clock().now().to_msg()
-        pose.pose.position.x = initial_x
-        pose.pose.position.y = initial_y
-        quaternion = yaw_to_quaternion(initial_yaw)
-        pose.pose.orientation.z = quaternion["z"]
-        pose.pose.orientation.w = quaternion["w"]
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        q = yaw_to_quaternion(yaw)
+        pose.pose.orientation.z = q["z"]
+        pose.pose.orientation.w = q["w"]
         return pose
 
-    def get_float_parameter(self, name):
-        value = self.get_parameter(name).value
-        return float(value)
-
-    def goal_callback(self, goal):
+    def goal_callback(self, goal: PoseStamped):
         if goal.header.frame_id != "map":
-            self.get_logger().error(
-                "Rejected navigation goal: frame_id must be 'map'"
-            )
+            self.get_logger().error("Rejected goal: frame_id must be 'map'")
             self.publish_status("failed")
             return
 
-        if self.active_goal_started_at is not None:
-            self.cancelTask()
-            self.publish_status("canceled")
+        with self._lock:
+            ready = self.nav2_ready
+
+        if not ready:
+            self.get_logger().info("Nav2 not ready yet — goal queued")
+            with self._lock:
+                self.pending_goal = goal
+            return
+
+        self._send_goal(goal)
+
+    def _send_goal(self, goal: PoseStamped):
+        with self._lock:
+            if self.active_goal_started_at is not None:
+                self.cancelTask()
+                self.publish_status("canceled")
 
         goal.header.stamp = self.get_clock().now().to_msg()
         self.publish_status("received")
         self.goToPose(goal)
-        self.active_goal_started_at = time.monotonic()
+
+        with self._lock:
+            self.active_goal_started_at = time.monotonic()
+
         self.publish_status("active")
 
     def check_navigation_status(self):
-        if self.active_goal_started_at is None:
+        with self._lock:
+            started_at = self.active_goal_started_at
+
+        if started_at is None:
             return
 
-        if time.monotonic() - self.active_goal_started_at > self.goal_timeout_sec:
+        if time.monotonic() - started_at > self.goal_timeout_sec:
             self.cancelTask()
-            self.active_goal_started_at = None
+            with self._lock:
+                self.active_goal_started_at = None
             self.publish_status("timeout")
             return
 
@@ -100,7 +136,9 @@ class GoalNavigationNode(BasicNavigator):
             return
 
         result = self.getResult()
-        self.active_goal_started_at = None
+
+        with self._lock:
+            self.active_goal_started_at = None
 
         if result == TaskResult.SUCCEEDED:
             self.publish_status("succeeded")
