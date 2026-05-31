@@ -25,8 +25,10 @@ class MissionPlannerNode(BasicNavigator):
         self.declare_parameter('initial_x', 0.0)
         self.declare_parameter('initial_y', 0.0)
         self.declare_parameter('initial_yaw', 0.0)
+        self.declare_parameter('localizer', 'slam_toolbox')  # 'amcl' when using pre-built map
 
         self.goal_timeout_sec = float(self.get_parameter('goal_timeout_sec').value)
+        localizer = self.get_parameter('localizer').value
         self.active_goal_started_at = None
         self.goal_handle = None
         self._pending_goal = None  # (mode, x, y, yaw) — queued while cancel is in flight
@@ -42,8 +44,8 @@ class MissionPlannerNode(BasicNavigator):
             float(self.get_parameter('initial_yaw').value),
         )
         self.setInitialPose(initial_pose)
-        self.get_logger().info('Waiting for Nav2...')
-        self.waitUntilNav2Active(localizer='slam_toolbox')
+        self.get_logger().info(f'Waiting for Nav2 (localizer={localizer})...')
+        self.waitUntilNav2Active(localizer=localizer)
         self.get_logger().info('Nav2 active — ready for goals')
 
         # Timer only checks timeout — no BasicNavigator spinning methods called

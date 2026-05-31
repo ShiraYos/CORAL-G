@@ -100,7 +100,7 @@ controller_server:
     goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.05
       yaw_goal_tolerance: 0.25
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
@@ -126,7 +126,7 @@ controller_server:
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.5
-      xy_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.05
       trans_stopped_velocity: 0.25
       short_circuit_trajectory_evaluation: true
       stateful: true
@@ -159,7 +159,7 @@ local_costmap:
       plugins: ["obstacle_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.35
+        inflation_radius: 0.20
         cost_scaling_factor: 5.0
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -248,14 +248,14 @@ global_costmap:
         transform_tolerance: 0.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.35
+        inflation_radius: 0.20
         cost_scaling_factor: 5.0
       always_send_full_costmap: true
 
 map_server:
   ros__parameters:
     use_sim_time: True
-    yaml_filename: "map.yaml"
+    yaml_filename: "/ws/src/my_tb3_world/maps/arena_map.yaml"
 
 map_saver:
   ros__parameters:
@@ -338,7 +338,7 @@ collision_monitor:
       min_points: 4
       visualize: true
       polygon_pub_topic: "polygon_stop"
-      enabled: true
+      enabled: false
     PolygonSlow:
       type: "polygon"
       points: "[[0.1, 0.1], [0.1, -0.1], [-0.1, -0.1], [-0.1, 0.1]]"
