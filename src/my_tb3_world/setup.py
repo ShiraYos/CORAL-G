@@ -15,6 +15,8 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*.world')),
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*.sdf')),
+        (os.path.join('share', package_name, 'params'), glob('params/*.yaml')),
+        (os.path.join('share', package_name, 'maps'), glob('maps/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -28,10 +30,11 @@ setup(
             'publisher_node = my_tb3_world.publisher_node:main',
             'subscriber_node = my_tb3_world.subscriber_node:main',
             'objectAvoidance_node = my_tb3_world.objectAvoidance_node:main',
-            'goal_navigation_node = my_tb3_world.goal_navigation_node:main',
-            'stateSync_node = my_tb3_world.stateSync_node:main',
-            'twin_input_node = my_tb3_world.twin_input_node:main',
+            # DTAS nodes
+            'robot_state_node = my_tb3_world.robot_state_node:main',
+            'environment_node = my_tb3_world.environment_node:main',
             'digital_twin_state_node = my_tb3_world.digital_twin_state_node:main',
+            'mission_planner_node = my_tb3_world.mission_planner_node:main',
         ],
     },
 )

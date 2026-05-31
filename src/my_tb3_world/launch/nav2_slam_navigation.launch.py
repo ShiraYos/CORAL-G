@@ -3,7 +3,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -13,16 +13,12 @@ def generate_launch_description():
 
     # Get package directories
     nav2_bringup_share = get_package_share_directory("nav2_bringup")
-    turtlebot3_navigation_share = get_package_share_directory("turtlebot3_navigation2")
+    my_pkg_share = get_package_share_directory("my_tb3_world")
 
-    # Default params file path - defined BEFORE LaunchConfiguration
-    default_params_file = os.path.join(
-        turtlebot3_navigation_share,
-        "param",
-        "burger.yaml",
-    )
+    # Use the project's custom params (tuned progress checker + inflation for 4x4m arena)
+    default_params_file = os.path.join(my_pkg_share, "params", "nav2_params.yaml")
 
-    # Launch configurations - params_file now has a default
+    # Launch configurations
     use_sim_time = LaunchConfiguration("use_sim_time", default="true")
     autostart = LaunchConfiguration("autostart", default="true")
     params_file = LaunchConfiguration("params_file", default=default_params_file)
@@ -31,7 +27,7 @@ def generate_launch_description():
     initial_y = LaunchConfiguration("initial_y", default="0.0")
     initial_yaw = LaunchConfiguration("initial_yaw", default="0.0")
 
-    # SLAM Toolbox
+    # SLAM Toolbox — launches first
     slam = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(nav2_bringup_share, "launch", "slam_launch.py")
@@ -42,7 +38,7 @@ def generate_launch_description():
         }.items(),
     )
 
-    # Nav2 navigation stack
+    # Nav2 navigation stack — delayed 5 seconds to let SLAM initialize first
     nav2 = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(nav2_bringup_share, "launch", "navigation_launch.py")
@@ -54,11 +50,11 @@ def generate_launch_description():
         }.items(),
     )
 
-    # Goal navigation bridge node
-    goal_navigation_node = Node(
+    # Mission planner node — delayed 10 seconds to let Nav2 initialize first
+    mission_planner_node = Node(
         package="my_tb3_world",
-        executable="goal_navigation_node",
-        name="goal_navigation_node",
+        executable="mission_planner_node",
+        name="mission_planner_node",
         output="screen",
         parameters=[{
             "use_sim_time": use_sim_time,
@@ -105,7 +101,10 @@ def generate_launch_description():
             default_value="0.0",
             description="Initial yaw estimate in radians.",
         ),
+        # SLAM starts immediately
         slam,
-        nav2,
-        goal_navigation_node,
+        # Nav2 starts after 5 seconds — gives SLAM time to initialize
+        TimerAction(period=5.0, actions=[nav2]),
+        # Mission planner starts after 10 seconds — gives Nav2 time to be ready
+        TimerAction(period=10.0, actions=[mission_planner_node]),
     ])
