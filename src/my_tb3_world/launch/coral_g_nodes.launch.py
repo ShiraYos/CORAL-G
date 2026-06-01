@@ -2,9 +2,12 @@
 """
 CORAL-G DTAS Node Launch File
 Launches all digital twin layer nodes:
-  - robot_state_node      — tracks pose, fuel, storage from /odom + /collection_event
-  - environment_node      — publishes env grid and detects waste collections
+  - base_reference_node     — latches /base_pose from params (default: origin)
+  - robot_state_node        — tracks pose, fuel, storage from /odom + /collection_event
+  - environment_node        — publishes env grid and detects waste collections
   - digital_twin_state_node — merges all inputs into /twin_state
+  - debris_prediction_node  — maps uncollected clusters onto /debris_density_map
+  - field_planner_node      — autonomous planner; publishes /next_cell_goal
 
 Run AFTER:
   1. new_world.launch.py           (Gazebo)
@@ -17,6 +20,19 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     return LaunchDescription([
+
+        Node(
+            package='my_tb3_world',
+            executable='base_reference_node',
+            name='base_reference_node',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'base_x': 0.0,
+                'base_y': 0.0,
+                'base_yaw': 0.0,
+            }],
+        ),
 
         Node(
             package='my_tb3_world',
@@ -53,6 +69,30 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'publish_rate_hz': 1.0,
+            }],
+        ),
+
+        Node(
+            package='my_tb3_world',
+            executable='debris_prediction_node',
+            name='debris_prediction_node',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'publish_rate_hz': 1.0,
+            }],
+        ),
+
+        Node(
+            package='my_tb3_world',
+            executable='field_planner_node',
+            name='field_planner_node',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'plan_rate_hz': 0.5,
+                'fuel_return_threshold': 0.15,
+                'storage_return_threshold': 1.0,
             }],
         ),
 

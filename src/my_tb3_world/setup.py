@@ -35,6 +35,9 @@ setup(
             'environment_node = my_tb3_world.environment_node:main',
             'digital_twin_state_node = my_tb3_world.digital_twin_state_node:main',
             'mission_planner_node = my_tb3_world.mission_planner_node:main',
+            'base_reference_node = my_tb3_world.base_reference_node:main',
+            'debris_prediction_node = my_tb3_world.debris_prediction_node:main',
+            'field_planner_node = my_tb3_world.field_planner_node:main',
         ],
     },
 )
