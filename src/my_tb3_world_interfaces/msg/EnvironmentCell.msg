@@ -1,0 +1,10 @@
+float64 x
+float64 y
+string occupancy
+bool has_environment
+float64 current_x
+float64 current_y
+float64 wind_x
+float64 wind_y
+float64 wave_height
+float64 confidence

@@ -32,6 +32,7 @@ setup(
             'objectAvoidance_node = my_tb3_world.objectAvoidance_node:main',
             # DTAS nodes
             'robot_state_node = my_tb3_world.robot_state_node:main',
+            'environment_generator_node = my_tb3_world.environment_generator_node:main',
             'environment_node = my_tb3_world.environment_node:main',
             'digital_twin_state_node = my_tb3_world.digital_twin_state_node:main',
             'mission_planner_node = my_tb3_world.mission_planner_node:main',

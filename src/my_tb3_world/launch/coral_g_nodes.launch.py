@@ -4,10 +4,12 @@ CORAL-G DTAS Node Launch File
 Launches all digital twin layer nodes:
   - base_reference_node     — latches /base_pose from params (default: origin)
   - robot_state_node        — tracks pose, fuel, storage from /odom + /collection_event
-  - environment_node        — publishes env grid and detects waste collections
+  - environment_generator_node — provides map-aware current/wind/wave field service
+  - environment_node        — owns current physical debris truth, publishes env grid,
+                              detects waste collections, and emits /dashboard debug data
   - digital_twin_state_node — merges all inputs into /twin_state
-  - debris_prediction_node  — maps uncollected clusters onto /debris_density_map
-  - field_planner_node      — autonomous planner; publishes /next_cell_goal
+  - debris_prediction_node  — publishes normalized debris density cells
+  - field_planner_node      — plans from density cells; publishes /next_cell_goal
 
 Run AFTER:
   1. new_world.launch.py           (Gazebo)
@@ -50,14 +52,33 @@ def generate_launch_description():
 
         Node(
             package='my_tb3_world',
+            executable='environment_generator_node',
+            name='environment_generator_node',
+            output='screen',
+            parameters=[{
+                'use_sim_time': True,
+                'cell_size_m': 0.5,
+                'current_strength': 0.3,
+                'current_heading_deg': 45.0,
+                'wind_x': 0.1,
+                'wind_y': 0.05,
+                'wave_height': 0.2,
+                'confidence': 0.9,
+            }],
+        ),
+
+        Node(
+            package='my_tb3_world',
             executable='environment_node',
             name='environment_node',
             output='screen',
             parameters=[{
                 'use_sim_time': True,
-                'cell_size_m': 1.0,
+                'cell_size_m': 0.5,
                 'tick_rate_hz': 1.0,
-                'collection_radius_m': 1.0,
+                'debris_drift_enabled': True,
+                'debris_drift_scale': 0.1,
+                'physical_debris_seed': 23,
             }],
         ),
 
@@ -69,6 +90,7 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'publish_rate_hz': 1.0,
+                'cell_size_m': 0.5,
             }],
         ),
 
@@ -80,6 +102,11 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'publish_rate_hz': 1.0,
+                'prediction_debris_count': 100,
+                'simulation_horizon_sec': 60.0,
+                'random_seed': 23,
+                'prediction_drift_enabled': True,
+                'prediction_drift_scale': 0.1,
             }],
         ),
 
@@ -91,8 +118,15 @@ def generate_launch_description():
             parameters=[{
                 'use_sim_time': True,
                 'plan_rate_hz': 0.5,
-                'fuel_return_threshold': 0.15,
-                'storage_return_threshold': 1.0,
+                'fuel_return_threshold': 0.25,
+                'storage_return_threshold': 0.8,
+                'density_reward_weight': 1.0,
+                'travel_cost_weight': 0.2,
+                'storage_penalty_weight': 0.5,
+                'fuel_penalty_weight': 0.5,
+                'map_risk_weight': 0.5,
+                'return_reserve': 0.2,
+                'min_density_reward': 0.1,
             }],
         ),
 

@@ -1,0 +1,10 @@
+string frame_id
+float64 cell_size_m
+string generation_controls_json
+---
+bool success
+string environment_status
+string environment_source
+float64 confidence
+EnvironmentCell[] cells
+string[] warnings

@@ -8,10 +8,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from nav_msgs.msg import OccupancyGrid
 from std_msgs.msg import String
 
+from my_tb3_world.debris_particles import MATERIALS, normalize_material
+from my_tb3_world.environment_field import DEFAULT_CELL_SIZE, build_map_cells
 
-ARENA_MIN = -2.0
-ARENA_MAX = 2.0
-CELL_SIZE = 1.0
 MAX_COLLECTION_HISTORY = 20
 
 
@@ -20,6 +19,8 @@ class DigitalTwinStateNode(Node):
         super().__init__('digital_twin_state_node')
 
         self.declare_parameter('publish_rate_hz', 1.0)
+        self.declare_parameter('cell_size_m', DEFAULT_CELL_SIZE)
+        self.cell_size = self.get_parameter('cell_size_m').value
 
         # Input state
         self.robot_state = None
@@ -28,7 +29,7 @@ class DigitalTwinStateNode(Node):
         self.map_cells = []          # arena cells derived from OccupancyGrid
         self.map_received = False
         self.collection_events = []  # rolling history
-        self.material_evidence = {'A': 0, 'B': 0, 'C': 0}
+        self.material_evidence = {material: 0 for material in MATERIALS}
 
         # /map uses TRANSIENT_LOCAL so we receive it even if published before we start
         map_qos = QoSProfile(
@@ -36,8 +37,6 @@ class DigitalTwinStateNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        best_effort = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
-
         self.create_subscription(String, '/robot_state', self._robot_state_cb, 10)
         self.create_subscription(String, '/environment_observation', self._env_obs_cb, 10)
         self.create_subscription(String, '/base_pose', self._base_pose_cb, 10)
@@ -84,46 +83,17 @@ class DigitalTwinStateNode(Node):
 
         # Accumulate observed material evidence
         for mat, count in event.get('materials', {}).items():
-            if mat in self.material_evidence:
-                self.material_evidence[mat] += count
+            material = normalize_material(mat)
+            if material in self.material_evidence:
+                self.material_evidence[material] += count
 
         self.get_logger().info(
             f'Collection event recorded — material_evidence so far: {self.material_evidence}'
         )
 
     def _map_cb(self, msg: OccupancyGrid):
-        """Convert OccupancyGrid to arena 1m grid cells."""
-        cells = []
-        res = msg.info.resolution
-        ox = msg.info.origin.position.x
-        oy = msg.info.origin.position.y
-        width = msg.info.width
-
-        x = ARENA_MIN + CELL_SIZE / 2.0
-        while x < ARENA_MAX:
-            y = ARENA_MIN + CELL_SIZE / 2.0
-            while y < ARENA_MAX:
-                gx = int((x - ox) / res)
-                gy = int((y - oy) / res)
-
-                if 0 <= gx < msg.info.width and 0 <= gy < msg.info.height:
-                    val = msg.data[gy * width + gx]
-                    if val == 0:
-                        occupancy = 'free'
-                    elif val == -1:
-                        occupancy = 'unknown'
-                    else:
-                        occupancy = 'blocked'
-                else:
-                    occupancy = 'unknown'
-
-                cells.append({
-                    'x': round(x, 3),
-                    'y': round(y, 3),
-                    'occupancy': occupancy,
-                })
-                y += CELL_SIZE
-            x += CELL_SIZE
+        """Convert OccupancyGrid to map-derived simulation grid cells."""
+        cells = build_map_cells(msg, self.cell_size)
 
         self.map_cells = cells
         self.map_received = True
