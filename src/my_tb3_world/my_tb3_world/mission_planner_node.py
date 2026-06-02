@@ -53,15 +53,18 @@ class MissionPlannerNode(BasicNavigator):
         self.create_subscription(String, '/twin_state', self._twin_state_cb, 10)
         self.collection_pub = self.create_publisher(String, '/collection_event', 10)
 
-        initial_pose = self._make_pose(
+        self._initial_pose = self._make_pose(
             float(self.get_parameter('initial_x').value),
             float(self.get_parameter('initial_y').value),
             float(self.get_parameter('initial_yaw').value),
         )
-        self.setInitialPose(initial_pose)
+        # Send once immediately (may be dropped if AMCL isn't up yet)
+        self.setInitialPose(self._initial_pose)
         self.get_logger().info(f'Waiting for Nav2 (localizer={localizer})...')
         self.waitUntilNav2Active(localizer=localizer)
-        self.get_logger().info('Nav2 active — ready for goals')
+        # Re-send after Nav2 is confirmed active so AMCL definitely receives it
+        self.setInitialPose(self._initial_pose)
+        self.get_logger().info('Nav2 active — initial pose set, ready for goals')
 
         # Timer only checks timeout — no BasicNavigator spinning methods called
         self.create_timer(0.5, self._check_timeout)

@@ -4,9 +4,16 @@ Full CORAL-G demo launcher.
 
 Starts:
   - Gazebo world and TurtleBot3 spawn
-  - SLAM + Nav2 + mission_planner_node
+  - Nav2 with pre-built map (AMCL localisation) + mission_planner_node
   - CORAL-G digital mission nodes
   - optional RViz
+
+Simulation (default arena_map.yaml):
+  ros2 launch my_tb3_world coral_g_full_demo.launch.py use_rviz:=true min_density_reward:=0.001
+
+Lab (physical robot with lab map):
+  ros2 launch my_tb3_world coral_g_full_demo.launch.py use_rviz:=true min_density_reward:=0.001 \
+    map:=/home/<lab_username>/CORAL-G/src/my_tb3_world/maps/arena_map_lab.yaml
 
 Dashboard is intentionally launched separately from tools/debris_dashboard_web.py
 so it can be run from the source checkout on the host that needs browser access.
@@ -33,6 +40,9 @@ def generate_launch_description():
     initial_y = LaunchConfiguration('initial_y', default='0.0')
     initial_yaw = LaunchConfiguration('initial_yaw', default='0.0')
     min_density_reward = LaunchConfiguration('min_density_reward', default='0.001')
+    map_file = LaunchConfiguration('map', default=os.path.join(
+        my_pkg_share, 'maps', 'arena_map.yaml'
+    ))
 
     world_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -47,11 +57,12 @@ def generate_launch_description():
 
     nav2_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(my_pkg_share, 'launch', 'nav2_slam_navigation.launch.py')
+            os.path.join(my_pkg_share, 'launch', 'nav2_localization.launch.py')
         ),
         launch_arguments={
             'use_sim_time': use_sim_time,
             'autostart': autostart,
+            'map': map_file,
             'initial_x': initial_x,
             'initial_y': initial_y,
             'initial_yaw': initial_yaw,
@@ -107,6 +118,15 @@ def generate_launch_description():
             'initial_yaw',
             default_value='0.0',
             description='Initial yaw estimate in radians.',
+        ),
+        DeclareLaunchArgument(
+            'map',
+            default_value=os.path.join(my_pkg_share, 'maps', 'arena_map.yaml'),
+            description=(
+                'Full path to saved map yaml. '
+                'Defaults to arena_map.yaml for simulation, '
+                'pass arena_map_lab.yaml for physical robot.'
+            ),
         ),
         DeclareLaunchArgument(
             'min_density_reward',

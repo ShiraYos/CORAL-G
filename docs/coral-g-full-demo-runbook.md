@@ -16,19 +16,17 @@ Expected result: compile passes and the focused node suite passes.
 
 ## Get The Branch
 
-From the teammate's ROS/Gazebo machine:
+Pull the latest main branch:
 
 ```bash
 git fetch origin
-git checkout full-integration-planning
+git checkout main
+git pull
 ```
-
-If the branch has not been pushed yet, get the branch from the person who has
-this checkout, then continue from the workspace root.
 
 ## Build
 
-In a ROS 2 Humble environment:
+In a ROS 2 Jazzy environment (Docker image: osrf/ros:jazzy-desktop-full):
 
 ```bash
 colcon build --symlink-install

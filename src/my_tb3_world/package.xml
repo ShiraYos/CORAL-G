@@ -15,6 +15,8 @@
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
   <depend>my_tb3_world_interfaces</depend>
+  <depend>nav2_msgs</depend>
+  <depend>nav2_simple_commander</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
