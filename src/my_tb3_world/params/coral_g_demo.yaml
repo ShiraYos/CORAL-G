@@ -1,0 +1,42 @@
+environment_generator_node:
+  ros__parameters:
+    cell_size_m: 0.5
+    current_strength: 0.3
+    current_heading_deg: 45.0
+    wind_x: 0.1
+    wind_y: 0.05
+    wave_height: 0.2
+    confidence: 0.9
+
+environment_node:
+  ros__parameters:
+    cell_size_m: 0.5
+    tick_rate_hz: 1.0
+    debris_drift_enabled: true
+    debris_drift_scale: 0.015
+    physical_debris_seed: 23
+
+debris_prediction_node:
+  ros__parameters:
+    publish_rate_hz: 1.0
+    prediction_debris_count: 100
+    simulation_horizon_sec: 60.0
+    random_seed: 23
+    prediction_drift_enabled: true
+    prediction_drift_scale: 0.015
+
+field_planner_node:
+  ros__parameters:
+    plan_rate_hz: 0.5
+    fuel_return_threshold: 0.25
+    storage_return_threshold: 0.8
+    density_reward_weight: 1.0
+    travel_cost_weight: 0.2
+    storage_penalty_weight: 0.5
+    fuel_penalty_weight: 0.5
+    map_risk_weight: 0.5
+    return_reserve: 0.2
+    # Normalized density cells can be far below 0.1. The demo profile keeps the
+    # node code default conservative while allowing valid normalized density to
+    # produce visible mission goals.
+    min_density_reward: 0.001

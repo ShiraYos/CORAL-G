@@ -1,5 +1,11 @@
 # Digital Mission Loop Ledger
 
+Status: superseded for future work by
+[full-integration-ledger.md](/Users/olafbobryk/Documents/Tue/CBL/Digital%20Twin/CORAL-G/docs/full-integration-ledger.md).
+This ledger remains the verified history for the completed minimal digital
+mission loop through Chunk 8. Do not continue new full-integration work from
+this ledger unless explicitly asked to resume the old minimal-loop packet.
+
 Product spine: complete the minimal digital mission loop around the debris work:
 
 `/environment_observation + /collection_event + robot/base/map inputs -> /twin_state -> /debris_density_map -> /next_cell_goal -> Nav2 goal contract`

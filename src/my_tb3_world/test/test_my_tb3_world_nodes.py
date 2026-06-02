@@ -1575,6 +1575,44 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         )
         self.assertGreater(goal["components"]["density_reward"], goal["components"]["travel_cost"])
 
+    def test_field_planner_demo_threshold_accepts_low_normalized_density(self):
+        module = importlib.import_module("my_tb3_world.field_planner_node")
+        twin_state = {
+            "robot": {
+                "pose": {"x": 0.0, "y": 0.0},
+                "fuel_level": 1.0,
+                "storage_fill": 0.0,
+            },
+            "map": {
+                "known_area_ratio": 1.0,
+                "cells": [{"x": 0.5, "y": 0.0, "occupancy": "free"}],
+            },
+        }
+        density_map = {
+            "schema": "dtas.debris_density_map.v1",
+            "prediction_counts": {"active": 4},
+            "density_cells": [{"x": 0.5, "y": 0.0, "density": 0.02}],
+        }
+
+        default_node = module.FieldPlannerNode()
+        default_node._twin_state_cb(self._string_msg(twin_state))
+        default_node._density_map_cb(self._string_msg(density_map))
+        default_node._plan()
+
+        default_goal = json.loads(default_node.goal_pub.messages[-1].data)
+        self.assertEqual(default_goal["mode"], "idle")
+
+        demo_node = module.FieldPlannerNode()
+        demo_node._min_density_reward = 0.001
+        demo_node._twin_state_cb(self._string_msg(twin_state))
+        demo_node._density_map_cb(self._string_msg(density_map))
+        demo_node._plan()
+
+        demo_goal = json.loads(demo_node.goal_pub.messages[-1].data)
+        self.assertEqual(demo_goal["mode"], "cleanup")
+        self.assertEqual(demo_goal["goal"]["x"], 0.5)
+        self.assertEqual(demo_goal["components"]["density_reward"], 0.02)
+
     def test_field_planner_rejects_density_cells_blocked_in_twin_map(self):
         module = importlib.import_module("my_tb3_world.field_planner_node")
         node = module.FieldPlannerNode()
@@ -1956,6 +1994,88 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertAlmostEqual(goal.pose.pose.orientation.z, math.sin(-0.15))
         self.assertAlmostEqual(goal.pose.pose.orientation.w, math.cos(-0.15))
 
+    def test_mission_planner_successful_cleanup_emits_collection_event(self):
+        module = importlib.import_module("my_tb3_world.mission_planner_node")
+        node = module.MissionPlannerNode()
+
+        node._goal_cb(self._string_msg({
+            "schema": "dtas.next_cell_goal.v1",
+            "status": "selected",
+            "mode": "cleanup",
+            "goal": {
+                "frame_id": "map",
+                "x": 1.25,
+                "y": -0.5,
+                "yaw": 0.4,
+            },
+            "waste_type": "plastic",
+        }))
+        result_future = node.nav_to_pose_client.last_goal_handle.result_future
+        for callback in list(result_future.callbacks):
+            callback(result_future)
+
+        self.assertEqual(node.collection_pub.topic, "/collection_event")
+        event = json.loads(node.collection_pub.messages[-1].data)
+        self.assertEqual(event["schema"], "dtas.collection_event.v1")
+        self.assertEqual(event["source"], "mission_planner_node")
+        self.assertEqual(event["status"], "collected")
+        self.assertEqual(event["location"], {"x": 1.25, "y": -0.5})
+        self.assertEqual(event["count"], 1)
+        self.assertEqual(event["materials"], {"unknown": 1})
+        self.assertEqual(event["items"], [{"type": "unknown", "count": 1}])
+        self.assertEqual(event["collection_radius_m"], 0.2)
+
+    def test_mission_planner_protects_active_nav2_goal_from_planner_churn(self):
+        module = importlib.import_module("my_tb3_world.mission_planner_node")
+        node = module.MissionPlannerNode()
+
+        node._goal_cb(self._string_msg({
+            "schema": "dtas.next_cell_goal.v1",
+            "status": "selected",
+            "mode": "cleanup",
+            "goal": {
+                "frame_id": "map",
+                "x": 1.0,
+                "y": 0.0,
+                "yaw": 0.0,
+            },
+        }))
+        first_goal_handle = node.nav_to_pose_client.last_goal_handle
+
+        node._goal_cb(self._string_msg({
+            "schema": "dtas.next_cell_goal.v1",
+            "status": "selected",
+            "mode": "cleanup",
+            "goal": {
+                "frame_id": "map",
+                "x": 2.0,
+                "y": 0.0,
+                "yaw": 0.0,
+            },
+        }))
+
+        self.assertEqual(len(node.nav_to_pose_client.goals), 1)
+        self.assertEqual(first_goal_handle.cancel_count, 0)
+        self.assertIn("Ignoring cleanup goal while Nav2 goal is active", node.logger.messages)
+
+        result_future = first_goal_handle.result_future
+        for callback in list(result_future.callbacks):
+            callback(result_future)
+
+        node._goal_cb(self._string_msg({
+            "schema": "dtas.next_cell_goal.v1",
+            "status": "selected",
+            "mode": "cleanup",
+            "goal": {
+                "frame_id": "map",
+                "x": 2.0,
+                "y": 0.0,
+                "yaw": 0.0,
+            },
+        }))
+
+        self.assertEqual(len(node.nav_to_pose_client.goals), 2)
+
     def test_mission_planner_ignores_idle_goal(self):
         module = importlib.import_module("my_tb3_world.mission_planner_node")
         node = module.MissionPlannerNode()
@@ -1997,6 +2117,95 @@ class MyTb3WorldNodeTests(unittest.TestCase):
 
         self.assertEqual(node.nav_to_pose_client.goals, [])
         self.assertEqual(len(node.logger.errors), 2)
+
+    def test_mock_nav_success_flows_to_prediction_and_next_planner_goal(self):
+        mission_module = importlib.import_module("my_tb3_world.mission_planner_node")
+        prediction_module = importlib.import_module("my_tb3_world.debris_prediction_node")
+        planner_module = importlib.import_module("my_tb3_world.field_planner_node")
+
+        mission = mission_module.MissionPlannerNode()
+        mission._goal_cb(self._string_msg({
+            "schema": "dtas.next_cell_goal.v1",
+            "status": "selected",
+            "mode": "cleanup",
+            "goal": {
+                "frame_id": "map",
+                "x": 0.0,
+                "y": 0.0,
+                "yaw": 0.0,
+            },
+        }))
+        result_future = mission.nav_to_pose_client.last_goal_handle.result_future
+        for callback in list(result_future.callbacks):
+            callback(result_future)
+        collection_msg = mission.collection_pub.messages[-1]
+
+        prediction = prediction_module.DebrisPredictionNode()
+        prediction.prediction_debris_count = 2
+        prediction.prediction_drift_enabled = False
+        prediction.twin_map_cells = [
+            {"x": 0.0, "y": 0.0, "occupancy": "free"},
+            {"x": 1.0, "y": 0.0, "occupancy": "free"},
+        ]
+        prediction.prediction_particles = [
+            {
+                "id": "prediction_particle_collected",
+                "x": 0.0,
+                "y": 0.0,
+                "initial_x": 0.0,
+                "initial_y": 0.0,
+                "material": "plastic",
+                "vx": 0.0,
+                "vy": 0.0,
+                "ax": 0.0,
+                "ay": 0.0,
+                "status": "active",
+            },
+            {
+                "id": "prediction_particle_remaining",
+                "x": 1.0,
+                "y": 0.0,
+                "initial_x": 1.0,
+                "initial_y": 0.0,
+                "material": "wood",
+                "vx": 0.0,
+                "vy": 0.0,
+                "ax": 0.0,
+                "ay": 0.0,
+                "status": "active",
+            },
+        ]
+        prediction._collection_event_cb(collection_msg)
+        prediction._publish()
+
+        density_msg = prediction.density_pub.messages[-1]
+        density = json.loads(density_msg.data)
+        self.assertEqual(density["prediction_counts"]["observed_removed"], 1)
+        self.assertGreater(density["prediction_counts"]["active"], 0)
+
+        planner = planner_module.FieldPlannerNode()
+        planner._min_density_reward = 0.001
+        planner._twin_state_cb(self._string_msg({
+            "robot": {
+                "pose": {"x": 0.0, "y": 0.0},
+                "fuel_level": 1.0,
+                "storage_fill": 0.0,
+            },
+            "base": {"pose": {"x": 0.0, "y": 0.0, "yaw": 0.0}},
+            "map": {
+                "known_area_ratio": 1.0,
+                "cells": [
+                    {"x": 0.0, "y": 0.0, "occupancy": "free"},
+                    {"x": 1.0, "y": 0.0, "occupancy": "free"},
+                ],
+            },
+        }))
+        planner._density_map_cb(density_msg)
+        planner._plan()
+
+        next_goal = json.loads(planner.goal_pub.messages[-1].data)
+        self.assertEqual(next_goal["schema"], "dtas.next_cell_goal.v1")
+        self.assertIn(next_goal["mode"], {"cleanup", "idle"})
 
     def test_publisher_publishes_forward_velocity(self):
         module = importlib.import_module("my_tb3_world.publisher_node")

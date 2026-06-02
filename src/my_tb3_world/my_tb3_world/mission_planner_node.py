@@ -33,17 +33,25 @@ class MissionPlannerNode(BasicNavigator):
         self.declare_parameter('initial_y', 0.0)
         self.declare_parameter('initial_yaw', 0.0)
         self.declare_parameter('localizer', 'slam_toolbox')  # 'amcl' when using pre-built map
+        self.declare_parameter('collection_radius_m', 0.2)
+        self.declare_parameter('default_collection_material', 'unknown')
 
         self.goal_timeout_sec = float(self.get_parameter('goal_timeout_sec').value)
+        self.collection_radius_m = float(self.get_parameter('collection_radius_m').value)
+        self.default_collection_material = self.get_parameter(
+            'default_collection_material'
+        ).value
         localizer = self.get_parameter('localizer').value
         self.active_goal_started_at = None
         self.goal_handle = None
         self._pending_goal = None  # (mode, x, y, yaw) — queued while cancel is in flight
+        self._active_goal_intent = None
 
         self.twin_state = None
 
         self.create_subscription(String, '/next_cell_goal', self._goal_cb, 10)
         self.create_subscription(String, '/twin_state', self._twin_state_cb, 10)
+        self.collection_pub = self.create_publisher(String, '/collection_event', 10)
 
         initial_pose = self._make_pose(
             float(self.get_parameter('initial_x').value),
@@ -123,19 +131,16 @@ class MissionPlannerNode(BasicNavigator):
         return 0.0, 0.0, 0.0
 
     def _navigate(self, mode, x, y, yaw):
-        """Queue the new goal and cancel any active one first.
-        The new goal is only sent after the cancel is confirmed, avoiding
-        the race condition where Nav2 receives both in overlap."""
+        """Send a goal only when Nav2 is not already executing one."""
+        if self.goal_handle is not None or self.active_goal_started_at is not None:
+            self.get_logger().info(
+                f'Ignoring {mode} goal while Nav2 goal is active'
+            )
+            return
+
         self._pending_goal = (mode, x, y, yaw)
 
-        if self.goal_handle is not None:
-            self.get_logger().info('Canceling previous goal before sending new one')
-            cancel_future = self.goal_handle.cancel_goal_async()
-            cancel_future.add_done_callback(lambda f: self._on_cancel_done())
-            self.goal_handle = None
-            self.active_goal_started_at = None
-        else:
-            self._send_pending_goal()
+        self._send_pending_goal()
 
     def _on_cancel_done(self):
         """Called after Nav2 confirms the cancel — now safe to send the new goal."""
@@ -163,8 +168,10 @@ class MissionPlannerNode(BasicNavigator):
         if not goal_handle.accepted:
             self.get_logger().error(f'Goal rejected by Nav2: ({x:.2f}, {y:.2f})')
             self.active_goal_started_at = None
+            self._active_goal_intent = None
             return
         self.goal_handle = goal_handle
+        self._active_goal_intent = {'mode': mode, 'x': x, 'y': y}
         self.active_goal_started_at = time.monotonic()  # start timeout only after acceptance
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self._on_nav_result)
@@ -173,13 +180,41 @@ class MissionPlannerNode(BasicNavigator):
     def _on_nav_result(self, future):
         self.goal_handle = None
         self.active_goal_started_at = None
+        intent = self._active_goal_intent
+        self._active_goal_intent = None
         result = future.result()
         if result.status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info('Goal succeeded')
+            if intent and intent.get('mode') == 'cleanup':
+                self._publish_collection_event(intent)
         elif result.status == GoalStatus.STATUS_CANCELED:
             self.get_logger().info('Goal canceled')
         else:
             self.get_logger().warn(f'Goal failed (status={result.status})')
+
+    def _publish_collection_event(self, intent):
+        material = str(self.default_collection_material or 'unknown')
+        event = {
+            'schema': 'dtas.collection_event.v1',
+            'stamp': self._stamp(),
+            'source': 'mission_planner_node',
+            'location': {
+                'x': round(float(intent['x']), 3),
+                'y': round(float(intent['y']), 3),
+            },
+            'count': 1,
+            'items': [{'type': material, 'count': 1}],
+            'materials': {material: 1},
+            'collection_radius_m': self.collection_radius_m,
+            'status': 'collected',
+        }
+        msg = String()
+        msg.data = json.dumps(event)
+        self.collection_pub.publish(msg)
+        self.get_logger().info(
+            f'Collection event after Nav2 success at '
+            f'({event["location"]["x"]:.2f}, {event["location"]["y"]:.2f})'
+        )
 
     def _check_timeout(self):
         if self.active_goal_started_at is None or self.goal_handle is None:
@@ -190,6 +225,7 @@ class MissionPlannerNode(BasicNavigator):
             cancel_future.add_done_callback(lambda f: self.get_logger().info('Timeout cancel confirmed'))
             self.goal_handle = None
             self.active_goal_started_at = None
+            self._active_goal_intent = None
 
     def _make_pose(self, x, y, yaw) -> PoseStamped:
         pose = PoseStamped()
@@ -201,6 +237,10 @@ class MissionPlannerNode(BasicNavigator):
         pose.pose.orientation.z = q['z']
         pose.pose.orientation.w = q['w']
         return pose
+
+    def _stamp(self) -> str:
+        t = self.get_clock().now().to_msg()
+        return f'{t.sec}.{t.nanosec:09d}'
 
 
 def main(args=None):

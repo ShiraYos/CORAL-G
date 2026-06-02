@@ -1,5 +1,10 @@
 # Digital Mission Loop Handoff
 
+Status: superseded for future work by
+[full-integration-handoff.md](/Users/olafbobryk/Documents/Tue/CBL/Digital%20Twin/CORAL-G/docs/full-integration-handoff.md).
+This handoff remains the verified closeout for the minimal digital mission loop.
+Use it as history only; new work should start from the full-integration handoff.
+
 Active plan: [digital-mission-loop-ledger.md](/Users/olafbobryk/Documents/Tue/CBL/Digital%20Twin/CORAL-G/docs/digital-mission-loop-ledger.md)
 
 Product spine: `/environment_observation + /collection_event + robot/base/map inputs -> /twin_state -> /debris_density_map -> /next_cell_goal -> Nav2 goal contract`.

@@ -16,12 +16,97 @@ Run AFTER:
   2. nav2_slam_navigation.launch.py (Nav2 + SLAM + mission_planner_node)
 """
 
+import os
+
+from ament_index_python.packages import get_package_share_directory
+from launch.actions import DeclareLaunchArgument
 from launch import LaunchDescription
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    my_pkg_share = get_package_share_directory('my_tb3_world')
+    default_demo_params_file = os.path.join(
+        my_pkg_share,
+        'params',
+        'coral_g_demo.yaml',
+    )
+
+    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    demo_params_file = LaunchConfiguration(
+        'demo_params_file',
+        default=default_demo_params_file,
+    )
+    current_strength = LaunchConfiguration('current_strength', default='0.3')
+    current_heading_deg = LaunchConfiguration('current_heading_deg', default='45.0')
+    wind_x = LaunchConfiguration('wind_x', default='0.1')
+    wind_y = LaunchConfiguration('wind_y', default='0.05')
+    wave_height = LaunchConfiguration('wave_height', default='0.2')
+    debris_drift_scale = LaunchConfiguration('debris_drift_scale', default='0.015')
+    prediction_drift_scale = LaunchConfiguration(
+        'prediction_drift_scale',
+        default='0.015',
+    )
+    min_density_reward = LaunchConfiguration(
+        'min_density_reward',
+        default='0.001',
+    )
+
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'use_sim_time',
+            default_value='true',
+            description='Use simulation clock.',
+        ),
+        DeclareLaunchArgument(
+            'demo_params_file',
+            default_value=default_demo_params_file,
+            description='CORAL-G demo parameter profile.',
+        ),
+        DeclareLaunchArgument(
+            'current_strength',
+            default_value='0.3',
+            description='Base current strength for the environment field.',
+        ),
+        DeclareLaunchArgument(
+            'current_heading_deg',
+            default_value='45.0',
+            description='Base current heading in degrees.',
+        ),
+        DeclareLaunchArgument(
+            'wind_x',
+            default_value='0.1',
+            description='Environment wind x component.',
+        ),
+        DeclareLaunchArgument(
+            'wind_y',
+            default_value='0.05',
+            description='Environment wind y component.',
+        ),
+        DeclareLaunchArgument(
+            'wave_height',
+            default_value='0.2',
+            description='Environment wave height signal.',
+        ),
+        DeclareLaunchArgument(
+            'debris_drift_scale',
+            default_value='0.015',
+            description='Physical debris drift scale.',
+        ),
+        DeclareLaunchArgument(
+            'prediction_drift_scale',
+            default_value='0.015',
+            description='Prediction particle drift scale.',
+        ),
+        DeclareLaunchArgument(
+            'min_density_reward',
+            default_value='0.001',
+            description=(
+                'Demo planner threshold for normalized density cells. The node '
+                'default remains conservative at 0.1.'
+            ),
+        ),
 
         Node(
             package='my_tb3_world',
@@ -29,7 +114,7 @@ def generate_launch_description():
             name='base_reference_node',
             output='screen',
             parameters=[{
-                'use_sim_time': True,
+                'use_sim_time': use_sim_time,
                 'base_x': 0.0,
                 'base_y': 0.0,
                 'base_yaw': 0.0,
@@ -42,7 +127,7 @@ def generate_launch_description():
             name='robot_state_node',
             output='screen',
             parameters=[{
-                'use_sim_time': True,
+                'use_sim_time': use_sim_time,
                 'storage_capacity_items': 3,
                 'fuel_drain_rate': 0.05,
                 'fuel_low_threshold': 20.0,
@@ -55,14 +140,14 @@ def generate_launch_description():
             executable='environment_generator_node',
             name='environment_generator_node',
             output='screen',
-            parameters=[{
-                'use_sim_time': True,
+            parameters=[demo_params_file, {
+                'use_sim_time': use_sim_time,
                 'cell_size_m': 0.5,
-                'current_strength': 0.3,
-                'current_heading_deg': 45.0,
-                'wind_x': 0.1,
-                'wind_y': 0.05,
-                'wave_height': 0.2,
+                'current_strength': current_strength,
+                'current_heading_deg': current_heading_deg,
+                'wind_x': wind_x,
+                'wind_y': wind_y,
+                'wave_height': wave_height,
                 'confidence': 0.9,
             }],
         ),
@@ -72,12 +157,12 @@ def generate_launch_description():
             executable='environment_node',
             name='environment_node',
             output='screen',
-            parameters=[{
-                'use_sim_time': True,
+            parameters=[demo_params_file, {
+                'use_sim_time': use_sim_time,
                 'cell_size_m': 0.5,
                 'tick_rate_hz': 1.0,
                 'debris_drift_enabled': True,
-                'debris_drift_scale': 0.015,
+                'debris_drift_scale': debris_drift_scale,
                 'physical_debris_seed': 23,
             }],
         ),
@@ -88,7 +173,7 @@ def generate_launch_description():
             name='digital_twin_state_node',
             output='screen',
             parameters=[{
-                'use_sim_time': True,
+                'use_sim_time': use_sim_time,
                 'publish_rate_hz': 1.0,
                 'cell_size_m': 0.5,
             }],
@@ -99,14 +184,14 @@ def generate_launch_description():
             executable='debris_prediction_node',
             name='debris_prediction_node',
             output='screen',
-            parameters=[{
-                'use_sim_time': True,
+            parameters=[demo_params_file, {
+                'use_sim_time': use_sim_time,
                 'publish_rate_hz': 1.0,
                 'prediction_debris_count': 100,
                 'simulation_horizon_sec': 60.0,
                 'random_seed': 23,
                 'prediction_drift_enabled': True,
-                'prediction_drift_scale': 0.015,
+                'prediction_drift_scale': prediction_drift_scale,
             }],
         ),
 
@@ -115,8 +200,8 @@ def generate_launch_description():
             executable='field_planner_node',
             name='field_planner_node',
             output='screen',
-            parameters=[{
-                'use_sim_time': True,
+            parameters=[demo_params_file, {
+                'use_sim_time': use_sim_time,
                 'plan_rate_hz': 0.5,
                 'fuel_return_threshold': 0.25,
                 'storage_return_threshold': 0.8,
@@ -126,7 +211,7 @@ def generate_launch_description():
                 'fuel_penalty_weight': 0.5,
                 'map_risk_weight': 0.5,
                 'return_reserve': 0.2,
-                'min_density_reward': 0.1,
+                'min_density_reward': min_density_reward,
             }],
         ),
 
