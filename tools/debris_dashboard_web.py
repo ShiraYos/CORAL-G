@@ -8,11 +8,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 DEMO_ODOM_POINTS = [
-    ('away_from_debris', 0.0, 0.0),
-    ('debris_seed_a', 0.88, 1.04),
-    ('debris_seed_b', -1.2, -1.2),
-    ('debris_seed_c', -1.2, 1.2),
+    ('water_test_position', 0.3, 0.9),
 ]
+PLANNER_STALE_AFTER_SEC = 6.0
 
 HTML = """<!doctype html>
 <html lang="en">
@@ -53,7 +51,7 @@ HTML = """<!doctype html>
     }
     .surface { padding: 8px; }
     .panel { padding: 12px; }
-    .overview { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .overview { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
     .comparison { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .surfaceHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
     .surfaceHeader h2 { margin: 0; }
@@ -79,6 +77,7 @@ HTML = """<!doctype html>
     .wind { background: #6c5ce7; }
     .wave { background: #00a6a6; }
     .sum { background: #17201d; }
+    .planner { background: #b0265b; }
     .unknown { background: #9aa6ad; }
     .plastic { background: #2e8f6f; }
     .wood { background: #8b6f3e; }
@@ -88,7 +87,15 @@ HTML = """<!doctype html>
     .toggles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 10px; }
     .toggle { display: flex; align-items: center; gap: 7px; color: #31413c; font-size: 13px; }
     .toggle input { width: 16px; height: 16px; accent-color: #1d7285; }
+    .plannerGrid { display: grid; gap: 6px; font-size: 13px; color: #31413c; }
+    .plannerLine { display: grid; grid-template-columns: 96px 1fr; gap: 8px; align-items: baseline; }
+    .plannerLine span:first-child { color: #60736c; font-size: 12px; }
+    .plannerComponents { margin-top: 10px; padding-top: 8px; border-top: 1px solid #edf2f0; }
     .note { color: #60736c; font-size: 12px; margin-top: 8px; line-height: 1.35; }
+    .rulesPanel { grid-column: 1 / -1; }
+    .rulesIntro { color: #52645e; font-size: 12px; line-height: 1.4; margin: 0 0 10px; }
+    .rulesTable th, .rulesTable td { text-align: right; }
+    .rulesTable th:first-child, .rulesTable td:first-child { text-align: left; }
     @media (max-width: 860px) {
       main { grid-template-columns: 1fr; padding: 10px 6px; }
       .top { align-items: flex-start; flex-direction: column; }
@@ -125,6 +132,7 @@ HTML = """<!doctype html>
         <label class="toggle"><input id="layerWind" type="checkbox" checked>Wind</label>
         <label class="toggle"><input id="layerWave" type="checkbox" checked>Wave</label>
         <label class="toggle"><input id="layerSum" type="checkbox" checked>Sum force</label>
+        <label class="toggle"><input id="layerPlannerIntent" type="checkbox" checked>Planner intent</label>
       </div>
       <div class="note">Dashboard/debug only. These controls do not affect ROS mission topics.</div>
     </section>
@@ -135,10 +143,11 @@ HTML = """<!doctype html>
       <div class="legend"><span class="swatch metal"></span><span>metal particles: low wind response</span></div>
       <div class="legend"><span class="swatch unknown"></span><span>unknown: digital prior/fallback</span></div>
       <div class="legend"><span class="swatch density"></span><span>blue heatmap: predicted density cells</span></div>
-      <div class="legend"><span class="swatch current"></span><span>current arrows: water drift plus tide/vortex bias</span></div>
+      <div class="legend"><span class="swatch current"></span><span>current arrows: base flow, noise curl, eddies, shore redirect</span></div>
       <div class="legend"><span class="swatch wind"></span><span>wind arrows: surface drift</span></div>
-      <div class="legend"><span class="swatch wave"></span><span>wave arrows: turbulence signal</span></div>
+      <div class="legend"><span class="swatch wave"></span><span>wave arrows: turbulence and tide-height signal</span></div>
       <div class="legend"><span class="swatch sum"></span><span>sum force arrows: combined local field</span></div>
+      <div class="legend"><span class="swatch planner"></span><span>planner intent: selected /next_cell_goal</span></div>
       <div id="debrisDistribution" class="distribution">debris distribution: waiting for prediction dashboard</div>
       <div id="materialEvidence" class="note">material evidence: none</div>
     </section>
@@ -146,6 +155,19 @@ HTML = """<!doctype html>
       <h2>Robot</h2>
       <div id="robotPose">x=? y=?</div>
       <div id="robotStatus">pose: waiting</div>
+    </section>
+    <section class="panel">
+      <h2>Planner</h2>
+      <div class="plannerGrid">
+        <div class="plannerLine"><span>mode</span><strong id="plannerMode">waiting</strong></div>
+        <div class="plannerLine"><span>goal</span><strong id="plannerGoal">x=? y=? yaw=?</strong></div>
+        <div class="plannerLine"><span>utility</span><strong id="plannerUtility">?</strong></div>
+        <div class="plannerLine"><span>return</span><strong id="plannerReturn">?</strong></div>
+        <div class="plannerLine"><span>reason</span><strong id="plannerReason">waiting for /next_cell_goal</strong></div>
+        <div class="plannerLine"><span>updated</span><strong id="plannerUpdated">stale</strong></div>
+      </div>
+      <div id="plannerComponents" class="plannerGrid plannerComponents"></div>
+      <div class="note">Debug-only mirror of planner intent. Not mission input.</div>
     </section>
   </aside>
   <div class="comparison">
@@ -194,6 +216,36 @@ HTML = """<!doctype html>
       </div>
     </section>
   </div>
+  <section class="panel rulesPanel">
+    <h2>Debris Motion Rules</h2>
+    <p class="rulesIntro">
+      Particle acceleration combines local current, wind, wave jitter, and boid-style cohesion/separation. Material coefficients below multiply each force layer; higher values mean that material responds more strongly to that layer.
+    </p>
+    <div class="tableScroll">
+      <table class="rulesTable">
+        <thead>
+          <tr>
+            <th>Material</th>
+            <th>Current</th>
+            <th>Wind</th>
+            <th>Wave</th>
+            <th>Cohesion</th>
+            <th>Separation</th>
+          </tr>
+        </thead>
+        <tbody id="materialRules"></tbody>
+      </table>
+    </div>
+    <div class="canvasList">
+      <h3>Boid Rules</h3>
+      <div class="tableScroll">
+        <table>
+          <thead><tr><th>Rule</th><th>Value</th><th>Effect</th></tr></thead>
+          <tbody id="boidRules"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
 </main>
 <script>
 const views = {
@@ -219,7 +271,25 @@ function layerState() {
     wind: document.getElementById('layerWind').checked,
     wave: document.getElementById('layerWave').checked,
     sum: document.getElementById('layerSum').checked,
+    plannerIntent: document.getElementById('layerPlannerIntent').checked,
   };
+}
+
+function plannerIntent(payload) {
+  return payload.planner_intent || {};
+}
+
+function plannerGoal(intent) {
+  const goal = intent.goal || {};
+  if (
+    intent.mode === 'idle' ||
+    goal.frame_id !== 'map' ||
+    !Number.isFinite(goal.x) ||
+    !Number.isFinite(goal.y)
+  ) {
+    return null;
+  }
+  return goal;
 }
 
 function worldBounds(payload) {
@@ -241,6 +311,8 @@ function worldBounds(payload) {
   }
   const pose = (payload.robot || {}).pose || {};
   if (Number.isFinite(pose.x) && Number.isFinite(pose.y)) points.push([pose.x, pose.y]);
+  const goal = plannerGoal(plannerIntent(payload));
+  if (goal) points.push([goal.x, goal.y]);
   if (!points.length) return { minX: -2, minY: -2, maxX: 2, maxY: 2 };
   const xs = points.map(([x]) => x);
   const ys = points.map(([, y]) => y);
@@ -447,6 +519,53 @@ function drawRobot(view, payload, bounds, layers) {
   }
 }
 
+function drawPlannerIntent(view, payload, bounds, layers) {
+  if (!layers.plannerIntent) return;
+  const intent = plannerIntent(payload);
+  const goal = plannerGoal(intent);
+  if (!goal) return;
+  const { ctx } = view;
+  const [gx, gy] = worldToCanvas(view, bounds, goal.x, goal.y);
+  const pose = (payload.robot || {}).pose || {};
+  if (Number.isFinite(pose.x) && Number.isFinite(pose.y)) {
+    const [rx, ry] = worldToCanvas(view, bounds, pose.x, pose.y);
+    ctx.save();
+    ctx.strokeStyle = intent.stale ? 'rgba(176, 38, 91, 0.38)' : 'rgba(176, 38, 91, 0.82)';
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.lineWidth = 2.2;
+    ctx.setLineDash([8, 6]);
+    ctx.beginPath();
+    ctx.moveTo(rx, ry);
+    ctx.lineTo(gx, gy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const angle = Math.atan2(gy - ry, gx - rx);
+    const head = 12;
+    ctx.beginPath();
+    ctx.moveTo(gx, gy);
+    ctx.lineTo(gx - head * Math.cos(angle - 0.45), gy - head * Math.sin(angle - 0.45));
+    ctx.lineTo(gx - head * Math.cos(angle + 0.45), gy - head * Math.sin(angle + 0.45));
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.save();
+  ctx.strokeStyle = '#b0265b';
+  ctx.fillStyle = '#ffffff';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(gx, gy, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(gx - 14, gy);
+  ctx.lineTo(gx + 14, gy);
+  ctx.moveTo(gx, gy - 14);
+  ctx.lineTo(gx, gy + 14);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawView(view, payload, bounds, layers, mode) {
   const { canvas, ctx } = view;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -457,6 +576,7 @@ function drawView(view, payload, bounds, layers, mode) {
     drawPredictionDensity(view, payload, bounds, layers);
     drawPredictionParticles(view, payload, bounds, layers);
   }
+  drawPlannerIntent(view, payload, bounds, layers);
   drawRobot(view, payload, bounds, layers);
 }
 
@@ -547,6 +667,79 @@ function renderDistributionList(elementId, distribution, suffix) {
     .join('');
 }
 
+function renderMaterialRules(payload) {
+  const physical = payload.physical_debris || {};
+  const response = physical.material_response || {};
+  const rules = physical.boid_rules || {};
+  document.getElementById('materialRules').innerHTML = ['plastic', 'wood', 'metal', 'unknown']
+    .filter(name => response[name])
+    .map(name => {
+      const material = response[name] || {};
+      return `
+        <tr>
+          <td>${name}</td>
+          <td>${material.current ?? '-'}</td>
+          <td>${material.wind ?? '-'}</td>
+          <td>${material.wave ?? '-'}</td>
+          <td>${material.cohesion ?? '-'}</td>
+          <td>${material.separation ?? '-'}</td>
+        </tr>
+      `;
+    })
+    .join('');
+  const boidRows = [
+    ['neighbor radius', `${rules.neighbor_radius_m ?? '?'}m`, 'distance for cohesion/separation neighbors'],
+    ['separation scale', rules.separation_scale ?? '?', 'strength of close-particle repulsion'],
+    ['water damping', rules.water_damping ?? '?', 'fraction of previous velocity removed per tick'],
+    ['wave jitter scale', rules.wave_jitter_scale ?? '?', 'sideways/randomized wave perturbation strength'],
+  ];
+  document.getElementById('boidRules').innerHTML = boidRows.map(row => `
+    <tr>
+      <td>${row[0]}</td>
+      <td>${row[1]}</td>
+      <td>${row[2]}</td>
+    </tr>
+  `).join('');
+}
+
+function formatNumber(value, digits = 3) {
+  return Number.isFinite(value) ? String(Math.round(value * (10 ** digits)) / (10 ** digits)) : '?';
+}
+
+function renderPlannerIntent(payload) {
+  const intent = plannerIntent(payload);
+  const goal = plannerGoal(intent);
+  const mode = intent.mode || 'waiting';
+  const status = intent.status || (intent.stale ? 'stale' : 'waiting');
+  document.getElementById('plannerMode').textContent = `${mode} / ${status}`;
+  document.getElementById('plannerGoal').textContent = goal
+    ? `x=${formatNumber(goal.x)} y=${formatNumber(goal.y)} yaw=${formatNumber(goal.yaw || 0)}`
+    : 'no map-frame goal';
+  document.getElementById('plannerUtility').textContent = formatNumber(intent.utility);
+  document.getElementById('plannerReturn').textContent = intent.return_feasible === undefined
+    ? '?'
+    : String(Boolean(intent.return_feasible));
+  document.getElementById('plannerReason').textContent = intent.reason || 'waiting for /next_cell_goal';
+  const age = Number.isFinite(intent.age_sec) ? `${formatNumber(intent.age_sec, 1)}s old` : 'no update';
+  document.getElementById('plannerUpdated').textContent = `${intent.stale ? 'stale' : 'fresh'} (${age})`;
+  const components = intent.components || {};
+  const rows = [
+    ['density', components.density_reward],
+    ['travel', components.travel_cost],
+    ['fuel', components.fuel_penalty],
+    ['storage', components.storage_penalty],
+    ['map risk', components.map_risk],
+    ['return', components.return_cost],
+    ['fuel margin', components.fuel_margin],
+  ];
+  document.getElementById('plannerComponents').innerHTML = rows
+    .filter(([, value]) => value !== undefined)
+    .map(([label, value]) => `
+      <div class="plannerLine"><span>${label}</span><strong>${formatNumber(value)}</strong></div>
+    `)
+    .join('');
+}
+
 function updateText(payload) {
   const robot = payload.robot || {};
   const pose = robot.pose || {};
@@ -571,6 +764,7 @@ function updateText(payload) {
     : 'material evidence: none';
   document.getElementById('robotPose').textContent = `x=${pose.x ?? '?'} y=${pose.y ?? '?'}`;
   document.getElementById('robotStatus').textContent = `pose: ${robot.pose_received ? 'received' : 'waiting'}`;
+  renderPlannerIntent(payload);
 
   const physicalDist = physicalDistribution(payload);
   const digitalDist = digitalDistribution(payload);
@@ -578,6 +772,7 @@ function updateText(payload) {
   drawPie('digitalDistributionChart', digitalDist, 'belief');
   renderDistributionList('physicalDistributionList', physicalDist, 'count');
   renderDistributionList('digitalDistributionList', digitalDist, '%');
+  renderMaterialRules(payload);
 
   document.getElementById('physicalEvents').innerHTML = ((payload.physical_events || []).slice().reverse()).map(event => `
     <tr>
@@ -624,7 +819,7 @@ async function restartDebug() {
   }
 }
 document.getElementById('restartDebug').addEventListener('click', restartDebug);
-for (const id of ['layerMap', 'layerPhysical', 'layerPredictionParticles', 'layerDensity', 'layerRobot', 'layerCurrent', 'layerWind', 'layerWave', 'layerSum']) {
+for (const id of ['layerMap', 'layerPhysical', 'layerPredictionParticles', 'layerDensity', 'layerRobot', 'layerCurrent', 'layerWind', 'layerWave', 'layerSum', 'layerPlannerIntent']) {
   document.getElementById(id).addEventListener('change', () => {
     if (latestPayload) draw(latestPayload);
   });
@@ -640,6 +835,14 @@ poll();
 class DashboardState:
     def __init__(self):
         self.lock = threading.Lock()
+        self.planner_intent = {
+            'debug_only': True,
+            'forbidden_as_mission_input': True,
+            'status': 'waiting_for_next_cell_goal',
+            'mode': 'waiting',
+            'stale': True,
+        }
+        self.planner_received_monotonic = None
         self.payload = {
             'schema': 'dtas.dashboard.v1',
             'status': 'waiting_for_dashboard',
@@ -648,6 +851,7 @@ class DashboardState:
             'environment': {'cells': []},
             'robot': {'pose': {}},
             'prediction': {},
+            'planner_intent': self.planner_intent,
         }
         self.prediction = {}
         self.restart_requested = False
@@ -656,6 +860,7 @@ class DashboardState:
         with self.lock:
             if self.prediction:
                 payload['prediction'] = self.prediction
+            payload['planner_intent'] = self._planner_snapshot_locked()
             self.payload = payload
 
     def set_prediction(self, payload):
@@ -725,9 +930,33 @@ class DashboardState:
             self.prediction = prediction
             self.payload['prediction'] = prediction
 
+    def set_planner_intent(self, payload):
+        intent = dict(payload)
+        intent['debug_only'] = True
+        intent['forbidden_as_mission_input'] = True
+        with self.lock:
+            self.planner_intent = intent
+            self.planner_received_monotonic = time.monotonic()
+            self.payload['planner_intent'] = self._planner_snapshot_locked()
+
+    def _planner_snapshot_locked(self):
+        intent = dict(self.planner_intent)
+        if self.planner_received_monotonic is None:
+            intent['age_sec'] = None
+            intent['stale'] = True
+            return intent
+
+        age = time.monotonic() - self.planner_received_monotonic
+        intent['age_sec'] = round(age, 1)
+        intent['stale_after_sec'] = PLANNER_STALE_AFTER_SEC
+        intent['stale'] = age > PLANNER_STALE_AFTER_SEC
+        return intent
+
     def get_payload(self):
         with self.lock:
-            return dict(self.payload)
+            payload = dict(self.payload)
+            payload['planner_intent'] = self._planner_snapshot_locked()
+            return payload
 
     def request_restart(self):
         with self.lock:
@@ -796,7 +1025,7 @@ def main():
 
     import rclpy
     from nav_msgs.msg import Odometry
-    from rclpy.qos import QoSProfile, ReliabilityPolicy
+    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
     from std_msgs.msg import String
 
     state = DashboardState()
@@ -822,9 +1051,18 @@ def main():
     def prediction_dashboard_cb(msg):
         state.set_prediction_dashboard(json.loads(msg.data))
 
+    def planner_intent_cb(msg):
+        state.set_planner_intent(json.loads(msg.data))
+
     node.create_subscription(String, '/dashboard', dashboard_cb, 10)
     node.create_subscription(String, '/debris_density_map', density_cb, 10)
     node.create_subscription(String, '/prediction_dashboard', prediction_dashboard_cb, 10)
+    planner_qos = QoSProfile(
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+    node.create_subscription(String, '/next_cell_goal', planner_intent_cb, planner_qos)
 
     current_started = 0.0
     last_publish = 0.0
@@ -844,12 +1082,10 @@ def main():
                 debug_reset_pub.publish(reset_msg)
             if not args.demo_odom or odom_pub is None:
                 continue
-            if demo_index >= len(DEMO_ODOM_POINTS):
-                continue
-
             now = time.monotonic()
-            label, x, y = DEMO_ODOM_POINTS[demo_index]
-            if current_started == 0.0:
+            hold_last = demo_index >= len(DEMO_ODOM_POINTS)
+            label, x, y = DEMO_ODOM_POINTS[-1 if hold_last else demo_index]
+            if current_started == 0.0 and not hold_last:
                 current_started = now
                 print(f'[demo_odom] {label}: x={x} y={y}', flush=True)
 
@@ -861,7 +1097,7 @@ def main():
                 odom_pub.publish(odom)
                 last_publish = now
 
-            if now - current_started >= args.interval_sec:
+            if not hold_last and now - current_started >= args.interval_sec:
                 demo_index += 1
                 current_started = 0.0
     except KeyboardInterrupt:

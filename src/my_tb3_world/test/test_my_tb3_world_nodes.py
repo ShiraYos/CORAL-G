@@ -16,6 +16,7 @@ class FakeLogger:
     def __init__(self):
         self.messages = []
         self.errors = []
+        self.warnings = []
 
     def info(self, message):
         self.messages.append(message)
@@ -23,10 +24,14 @@ class FakeLogger:
     def error(self, message):
         self.errors.append(message)
 
+    def warn(self, message):
+        self.warnings.append(message)
+
 
 class FakePublisher:
-    def __init__(self, topic):
+    def __init__(self, topic, qos=None):
         self.topic = topic
+        self.qos = qos
         self.messages = []
 
     def publish(self, message):
@@ -42,6 +47,48 @@ class FakeFuture:
 
     def result(self):
         return self._result
+
+    def add_done_callback(self, callback):
+        callback(self)
+
+
+class FakePendingFuture:
+    def __init__(self, result=None):
+        self._result = result
+        self.callbacks = []
+
+    def result(self):
+        return self._result
+
+    def add_done_callback(self, callback):
+        self.callbacks.append(callback)
+
+
+class FakeGoalHandle:
+    def __init__(self, accepted=True):
+        self.accepted = accepted
+        self.cancel_count = 0
+        self.result_future = FakePendingFuture(
+            types.SimpleNamespace(status="succeeded")
+        )
+
+    def cancel_goal_async(self):
+        self.cancel_count += 1
+        return FakeFuture(types.SimpleNamespace(status="canceled"))
+
+    def get_result_async(self):
+        return self.result_future
+
+
+class FakeNavToPoseClient:
+    def __init__(self):
+        self.goals = []
+        self.last_goal_handle = None
+
+    def send_goal_async(self, goal_msg, feedback_callback=None):
+        self.goals.append(goal_msg)
+        self.last_goal_handle = FakeGoalHandle(accepted=True)
+        return FakeFuture(self.last_goal_handle)
 
 
 class FakeClient:
@@ -79,8 +126,8 @@ class FakeNode:
         self.timers = []
         self.parameters = {}
 
-    def create_publisher(self, _message_type, topic, _queue_size):
-        publisher = FakePublisher(topic)
+    def create_publisher(self, _message_type, topic, qos):
+        publisher = FakePublisher(topic, qos)
         self.publishers.append(publisher)
         return publisher
 
@@ -241,6 +288,12 @@ class FakeGenerateEnvironmentField:
             self.warnings = []
 
 
+class FakeNavigateToPose:
+    class Goal:
+        def __init__(self):
+            self.pose = None
+
+
 class FakeTaskResult:
     SUCCEEDED = "succeeded"
     CANCELED = "canceled"
@@ -260,6 +313,7 @@ class FakeBasicNavigator(FakeNode):
         self.goals = []
         self.cancel_count = 0
         self.waited_for_nav2 = False
+        self.nav_to_pose_client = FakeNavToPoseClient()
 
     def setInitialPose(self, pose):
         self.initial_pose = pose
@@ -312,6 +366,17 @@ def install_ros_stubs():
     nav2_robot_navigator.BasicNavigator = FakeBasicNavigator
     nav2_robot_navigator.TaskResult = FakeTaskResult
 
+    nav2_msgs = types.ModuleType("nav2_msgs")
+    nav2_msgs_action = types.ModuleType("nav2_msgs.action")
+    nav2_msgs_action.NavigateToPose = FakeNavigateToPose
+
+    action_msgs = types.ModuleType("action_msgs")
+    action_msgs_msg = types.ModuleType("action_msgs.msg")
+    action_msgs_msg.GoalStatus = types.SimpleNamespace(
+        STATUS_SUCCEEDED="succeeded",
+        STATUS_CANCELED="canceled",
+    )
+
     sensor_msgs = types.ModuleType("sensor_msgs")
     sensor_msgs_msg = types.ModuleType("sensor_msgs.msg")
     sensor_msgs_msg.LaserScan = FakeLaserScan
@@ -340,6 +405,10 @@ def install_ros_stubs():
             "geometry_msgs.msg": geometry_msgs_msg,
             "nav2_simple_commander": nav2_simple_commander,
             "nav2_simple_commander.robot_navigator": nav2_robot_navigator,
+            "nav2_msgs": nav2_msgs,
+            "nav2_msgs.action": nav2_msgs_action,
+            "action_msgs": action_msgs,
+            "action_msgs.msg": action_msgs_msg,
             "sensor_msgs": sensor_msgs,
             "sensor_msgs.msg": sensor_msgs_msg,
             "nav_msgs": nav_msgs,
@@ -404,6 +473,30 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertGreater(max(current_x_values) - min(current_x_values), 0.1)
         self.assertLess(max(wind_x_values) - min(wind_x_values), 0.03)
 
+    def test_environment_field_currents_change_with_field_time(self):
+        module = importlib.import_module("my_tb3_world.environment_field")
+        grid = FakeOccupancyGrid(width=4, height=4, resolution=1.0)
+
+        early = module.build_environment_cells(grid, 1.0, {"field_time_sec": 0.0})
+        later = module.build_environment_cells(grid, 1.0, {"field_time_sec": 30.0})
+
+        early_vectors = [(cell["current_x"], cell["current_y"]) for cell in early]
+        later_vectors = [(cell["current_x"], cell["current_y"]) for cell in later]
+        self.assertNotEqual(early_vectors, later_vectors)
+
+    def test_environment_field_defaults_make_visible_eddies(self):
+        module = importlib.import_module("my_tb3_world.environment_field")
+        grid = FakeOccupancyGrid(width=5, height=5, resolution=1.0)
+
+        cells = module.build_environment_cells(grid, 1.0, {"field_time_sec": 12.0})
+        current_magnitudes = [
+            math.hypot(cell["current_x"], cell["current_y"])
+            for cell in cells
+            if cell["has_environment"]
+        ]
+
+        self.assertGreater(max(current_magnitudes) - min(current_magnitudes), 0.35)
+
     def test_environment_field_vortex_rotates_around_center(self):
         module = importlib.import_module("my_tb3_world.environment_field")
         grid = FakeOccupancyGrid(width=4, height=4, resolution=1.0)
@@ -411,6 +504,7 @@ class MyTb3WorldNodeTests(unittest.TestCase):
             "current_strength": 0.0,
             "current_spatial_variation": 0.0,
             "current_shear": 0.0,
+            "current_noise_strength": 0.0,
             "wind_x": 0.0,
             "wind_y": 0.0,
             "wind_spatial_variation": 0.0,
@@ -453,6 +547,7 @@ class MyTb3WorldNodeTests(unittest.TestCase):
             "current_heading_deg": 180.0,
             "current_spatial_variation": 0.0,
             "current_shear": 0.0,
+            "current_noise_strength": 0.0,
             "wind_x": 0.0,
             "wind_y": 0.0,
             "wind_spatial_variation": 0.0,
@@ -473,7 +568,43 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertGreaterEqual(right_of_land["current_x"], 0.0)
         self.assertGreater(abs(right_of_land["current_y"]), 0.0)
 
-    def test_environment_field_damps_wave_near_land(self):
+    def test_environment_field_handles_two_blocked_incoming_cells(self):
+        module = importlib.import_module("my_tb3_world.environment_field")
+        grid = FakeOccupancyGrid(
+            width=4,
+            height=3,
+            resolution=1.0,
+            origin_x=0.0,
+            origin_y=0.0,
+            data=[
+                0, 0, 0, 0,
+                0, 100, 100, 0,
+                0, 0, 0, 0,
+            ],
+        )
+        controls = {
+            "current_strength": 0.8,
+            "current_heading_deg": 0.0,
+            "current_noise_strength": 0.0,
+            "vortex_strength": 0.0,
+            "vortex2_strength": 0.0,
+            "shore_influence_radius": 1.5,
+        }
+
+        cells = {
+            (cell["x"], cell["y"]): cell
+            for cell in module.build_environment_cells(grid, 1.0, controls)
+        }
+
+        self.assertFalse(cells[(1.5, 1.5)]["has_environment"])
+        self.assertFalse(cells[(2.5, 1.5)]["has_environment"])
+        left_of_blocked = cells[(0.5, 1.5)]
+        self.assertLessEqual(left_of_blocked["current_x"], 0.0)
+        self.assertGreater(abs(left_of_blocked["current_y"]), 0.0)
+        self.assertTrue(math.isfinite(cells[(0.5, 0.5)]["current_x"]))
+        self.assertTrue(math.isfinite(cells[(3.5, 2.5)]["current_y"]))
+
+    def test_environment_field_keeps_wave_stable_near_land(self):
         module = importlib.import_module("my_tb3_world.environment_field")
         grid = FakeOccupancyGrid(
             width=5,
@@ -487,6 +618,7 @@ class MyTb3WorldNodeTests(unittest.TestCase):
             "current_strength": 0.0,
             "current_spatial_variation": 0.0,
             "current_shear": 0.0,
+            "current_noise_strength": 0.0,
             "wave_height": 1.0,
             "wave_spatial_variation": 0.0,
             "tide_strength": 0.0,
@@ -500,7 +632,50 @@ class MyTb3WorldNodeTests(unittest.TestCase):
             for cell in module.build_environment_cells(grid, 1.0, controls)
         }
 
-        self.assertLess(cells[(1.5, 0.5)]["wave_height"], cells[(4.5, 0.5)]["wave_height"])
+        self.assertEqual(cells[(1.5, 0.5)]["wave_height"], cells[(4.5, 0.5)]["wave_height"])
+
+    def test_environment_field_tide_modifies_wave_not_current(self):
+        module = importlib.import_module("my_tb3_world.environment_field")
+        grid = FakeOccupancyGrid(width=2, height=1, resolution=1.0, origin_x=0.0, origin_y=0.0)
+        controls = {
+            "current_strength": 0.4,
+            "current_heading_deg": 0.0,
+            "current_noise_strength": 0.0,
+            "vortex_strength": 0.0,
+            "vortex2_strength": 0.0,
+            "wind_spatial_variation": 0.0,
+            "wave_height": 0.2,
+            "wave_spatial_variation": 0.0,
+        }
+
+        no_tide = module.build_environment_cells(grid, 1.0, {**controls, "tide_strength": 0.0})
+        tide = module.build_environment_cells(grid, 1.0, {**controls, "tide_strength": 0.5, "tide_phase": 1.0})
+
+        self.assertEqual(no_tide[0]["current_x"], tide[0]["current_x"])
+        self.assertEqual(no_tide[0]["current_y"], tide[0]["current_y"])
+        self.assertGreater(tide[0]["wave_height"], no_tide[0]["wave_height"])
+
+    def test_environment_field_opensimplex_current_varies_across_space(self):
+        module = importlib.import_module("my_tb3_world.environment_field")
+        grid = FakeOccupancyGrid(width=5, height=5, resolution=1.0)
+
+        cells = module.build_environment_cells(
+            grid,
+            1.0,
+            {
+                "current_strength": 0.0,
+                "current_noise_strength": 0.5,
+                "vortex_strength": 0.0,
+                "vortex2_strength": 0.0,
+            },
+        )
+
+        current_vectors = {
+            (cell["current_x"], cell["current_y"])
+            for cell in cells
+            if cell["has_environment"]
+        }
+        self.assertGreater(len(current_vectors), 4)
 
     def test_environment_grid_uses_map_bounds_and_cell_size(self):
         module = importlib.import_module("my_tb3_world.environment_field")
@@ -602,6 +777,148 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertEqual(node.map_cells[0], {"x": -1.9, "y": -0.9, "occupancy": "free"})
         self.assertEqual(node.map_cells[-1], {"x": 2.9, "y": 1.9, "occupancy": "free"})
 
+    def test_digital_twin_uses_environment_cells_when_map_is_missing(self):
+        module = importlib.import_module("my_tb3_world.digital_twin_state_node")
+        node = module.DigitalTwinStateNode()
+        node._env_obs_cb(self._string_msg({
+            "cells": [
+                {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "occupancy": "free",
+                    "current_x": 0.2,
+                    "current_y": 0.1,
+                    "wind_x": 0.03,
+                    "wind_y": 0.01,
+                    "wave_height": 0.4,
+                },
+                {
+                    "x": 0.2,
+                    "y": 0.0,
+                    "occupancy": "blocked",
+                    "has_environment": False,
+                    "current_x": 9.0,
+                    "current_y": 9.0,
+                },
+            ],
+            "environment_status": "ready",
+            "environment_source": "preset_fallback",
+        }))
+
+        node._publish()
+
+        twin_state = json.loads(node.twin_pub.messages[-1].data)
+        cells = twin_state["map"]["cells"]
+        self.assertEqual(twin_state["sync_status"], "partial (waiting: robot_state, base_pose, map)")
+        self.assertEqual(len(cells), 2)
+        self.assertEqual(cells[0]["occupancy"], "free")
+        self.assertEqual(cells[0]["current_x"], 0.2)
+        self.assertEqual(cells[0]["wave_height"], 0.4)
+        self.assertEqual(cells[1]["occupancy"], "blocked")
+        self.assertNotIn("current_x", cells[1])
+
+    def test_digital_twin_contract_keeps_density_and_debug_truth_out(self):
+        module = importlib.import_module("my_tb3_world.digital_twin_state_node")
+        node = module.DigitalTwinStateNode()
+        node._map_cb(FakeOccupancyGrid(
+            width=2,
+            height=2,
+            resolution=1.0,
+            origin_x=0.0,
+            origin_y=0.0,
+        ))
+        node._env_obs_cb(self._string_msg({
+            "environment_status": "ready",
+            "environment_source": "preset_fallback",
+            "cells": [
+                {
+                    "x": 0.1,
+                    "y": 0.1,
+                    "occupancy": "free",
+                    "current_x": 0.2,
+                    "current_y": 0.1,
+                    "wind_x": 0.03,
+                    "wind_y": 0.01,
+                    "wave_height": 0.4,
+                    "density": 0.9,
+                    "physical_particles": [{"id": "hidden_truth"}],
+                },
+            ],
+            "density_cells": [{"x": 0.1, "y": 0.1, "density": 1.0}],
+            "physical_particles": [{"id": "hidden_truth"}],
+        }))
+        node._base_pose_cb(self._string_msg({
+            "schema": "dtas.base_pose.v1",
+            "pose": {"x": -1.0, "y": -1.0, "yaw": 0.5},
+            "status": "known",
+        }))
+        node._robot_state_cb(self._string_msg({
+            "schema": "dtas.robot_state.v1",
+            "pose": {"x": 0.5, "y": 0.6, "yaw": 0.1},
+            "velocity": 0.2,
+            "odom_distance_m": 3.4,
+            "fuel_level": 0.7,
+            "storage_fill": 0.3,
+            "storage_count": 1,
+            "storage_capacity": 3,
+            "at_base": False,
+        }))
+        node._collection_event_cb(self._string_msg({
+            "schema": "dtas.collection_event.v1",
+            "location": {"x": 0.5, "y": 0.6},
+            "count": 2,
+            "materials": {"plastic": 1, "wood": 1},
+        }))
+
+        node._publish()
+
+        twin_state = json.loads(node.twin_pub.messages[-1].data)
+        self.assertEqual(twin_state["schema"], "dtas.twin_state.v1")
+        self.assertEqual(twin_state["source"], "digital_twin_state_node")
+        self.assertEqual(twin_state["sync_status"], "ready")
+        self.assertEqual(twin_state["base"]["pose"]["x"], -1.0)
+        self.assertEqual(twin_state["robot"]["pose"], {"x": 0.5, "y": 0.6, "yaw": 0.1})
+        self.assertEqual(twin_state["robot"]["fuel_level"], 0.7)
+        self.assertEqual(twin_state["material_evidence"], {"plastic": 1, "wood": 1, "metal": 0})
+        self.assertEqual(len(twin_state["collection_events"]), 1)
+        self.assertEqual(twin_state["environment_status"], "ready")
+        self.assertEqual(twin_state["environment_source"], "preset_fallback")
+        self.assertNotIn("density_cells", twin_state)
+        self.assertNotIn("physical_particles", twin_state)
+        for cell in twin_state["map"]["cells"]:
+            self.assertNotIn("density", cell)
+            self.assertNotIn("physical_particles", cell)
+
+    def test_digital_twin_debug_reset_clears_material_evidence(self):
+        module = importlib.import_module("my_tb3_world.digital_twin_state_node")
+        node = module.DigitalTwinStateNode()
+        node._collection_event_cb(self._string_msg({
+            "schema": "dtas.collection_event.v1",
+            "location": {"x": 0.5, "y": 0.6},
+            "count": 2,
+            "materials": {"plastic": 1, "wood": 1},
+        }))
+
+        node._debug_reset_cb(self._string_msg({"scope": "all"}))
+        node._publish()
+
+        twin_state = json.loads(node.twin_pub.messages[-1].data)
+        self.assertEqual(twin_state["material_evidence"], {"plastic": 0, "wood": 0, "metal": 0})
+        self.assertEqual(twin_state["collection_events"], [])
+
+    def test_robot_state_debug_reset_clears_storage_and_fuel(self):
+        module = importlib.import_module("my_tb3_world.robot_state_node")
+        node = module.RobotStateNode()
+        node.storage_count = 3
+        node.fuel_pct = 12.0
+        node.fuel_low = True
+
+        node._debug_reset_cb(self._string_msg({"scope": "all"}))
+
+        self.assertEqual(node.storage_count, 0)
+        self.assertEqual(node.fuel_pct, 100.0)
+        self.assertFalse(node.fuel_low)
+
     def test_environment_generator_service_waits_for_map(self):
         module = importlib.import_module("my_tb3_world.environment_generator_node")
         node = module.EnvironmentGeneratorNode()
@@ -621,6 +938,10 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         module = importlib.import_module("my_tb3_world.environment_generator_node")
         node = module.EnvironmentGeneratorNode()
         node.parameters["current_strength"] = 0.6
+        node.parameters["current_heading_deg"] = 0.0
+        node.parameters["current_noise_strength"] = 0.0
+        node.parameters["vortex_strength"] = 0.0
+        node.parameters["vortex2_strength"] = 0.0
         request = FakeGenerateEnvironmentField.Request()
         request.frame_id = "map"
         request.cell_size_m = 1.0
@@ -641,8 +962,8 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertEqual(response.environment_status, "ready")
         self.assertEqual(len(response.cells), 16)
         self.assertTrue(response.cells[0].has_environment)
-        self.assertGreater(response.cells[0].current_x, 0.5)
-        self.assertAlmostEqual(response.cells[0].wind_x, 0.391, places=3)
+        self.assertGreater(response.cells[0].current_x, 0.4)
+        self.assertAlmostEqual(response.cells[0].wind_x, 0.386, places=3)
         self.assertEqual(response.cells[4].occupancy, "blocked")
         self.assertFalse(response.cells[4].has_environment)
         self.assertEqual(response.cells[8].occupancy, "unknown")
@@ -729,6 +1050,73 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertEqual(len(dashboard["prediction_particles"]), 1)
         self.assertEqual(dashboard["prediction_particles"][0]["x"], 0.98)
         self.assertEqual(dashboard["prediction_particles"][0]["material"], "plastic")
+
+    def test_debris_density_map_contract_is_planner_facing_only(self):
+        module = importlib.import_module("my_tb3_world.debris_prediction_node")
+        node = module.DebrisPredictionNode()
+        node.prediction_debris_count = 2
+        node.prediction_drift_enabled = False
+        node.twin_map_cells = [
+            {"x": 0.0, "y": 0.0, "occupancy": "free"},
+            {"x": 1.0, "y": 0.0, "occupancy": "free"},
+        ]
+        node.prediction_particles = [
+            {
+                "id": "prediction_particle_a",
+                "x": 0.0,
+                "y": 0.0,
+                "initial_x": 0.0,
+                "initial_y": 0.0,
+                "material": "plastic",
+                "vx": 0.0,
+                "vy": 0.0,
+                "ax": 0.0,
+                "ay": 0.0,
+                "status": "active",
+            },
+            {
+                "id": "prediction_particle_b",
+                "x": 1.0,
+                "y": 0.0,
+                "initial_x": 1.0,
+                "initial_y": 0.0,
+                "material": "wood",
+                "vx": 0.0,
+                "vy": 0.0,
+                "ax": 0.0,
+                "ay": 0.0,
+                "status": "active",
+            },
+        ]
+
+        node._publish()
+
+        density = json.loads(node.density_pub.messages[-1].data)
+        self.assertEqual(density["schema"], "dtas.debris_density_map.v1")
+        self.assertEqual(density["source"], "debris_prediction_node")
+        self.assertEqual(density["frame_id"], "map")
+        self.assertEqual(density["status"], "ready")
+        self.assertEqual(density["cells"], density["density_cells"])
+        self.assertAlmostEqual(
+            sum(cell["density"] for cell in density["density_cells"]),
+            1.0,
+            places=5,
+        )
+        self.assertNotIn("prediction_particles", density)
+        self.assertNotIn("physical_particles", density)
+        self.assertNotIn("material_belief", density)
+        self.assertNotIn("robot", density)
+        self.assertNotIn("map", density)
+        for cell in density["density_cells"]:
+            self.assertEqual(set(cell.keys()), {"x", "y", "density"})
+            self.assertNotIn("material", cell)
+            self.assertNotIn("cell_id", cell)
+            self.assertGreaterEqual(cell["density"], 0.0)
+            self.assertLessEqual(cell["density"], 1.0)
+
+        dashboard = json.loads(node.prediction_dashboard_pub.messages[-1].data)
+        self.assertIn("prediction_particles", dashboard)
+        self.assertIn("material_belief", dashboard)
 
     def test_debris_prediction_washes_out_into_blocked_twin_cell(self):
         module = importlib.import_module("my_tb3_world.debris_prediction_node")
@@ -964,13 +1352,94 @@ class MyTb3WorldNodeTests(unittest.TestCase):
 
         density = json.loads(node.density_pub.messages[-1].data)
         cells = {cell["x"]: cell["density"] for cell in density["density_cells"]}
-        self.assertLess(cells[0.0], cells[3.0])
+        active_particles = [
+            particle for particle in node.prediction_particles
+            if particle["status"] == "active"
+        ]
+        density_cells = density["density_cells"]
+        for particle in active_particles:
+            nearest = min(
+                density_cells,
+                key=lambda cell: (
+                    (cell["x"] - particle["x"]) ** 2 +
+                    (cell["y"] - particle["y"]) ** 2
+                ),
+            )
+            self.assertGreater(nearest["density"], 0.0)
         self.assertEqual(density["prediction_counts"]["observed_removed"], 1)
         self.assertEqual(density["prediction_counts"]["active"], 4)
         self.assertAlmostEqual(sum(cells.values()), 1.0, places=5)
         dashboard = json.loads(node.prediction_dashboard_pub.messages[-1].data)
+        self.assertEqual(dashboard["belief_model"]["type"], "active_prediction_particle_density")
         self.assertTrue(dashboard["belief_model"]["normalized_for_planner_reward"])
         self.assertTrue(dashboard["belief_model"]["counts_are_debug_status"])
+
+    def test_debris_prediction_density_does_not_leave_collection_hole_over_active_particle(self):
+        module = importlib.import_module("my_tb3_world.debris_prediction_node")
+        node = module.DebrisPredictionNode()
+        node.prediction_debris_count = 2
+        node.prediction_drift_enabled = False
+        node.twin_map_cells = [
+            {"x": 0.0, "y": 0.0, "occupancy": "free"},
+            {"x": 1.0, "y": 0.0, "occupancy": "free"},
+        ]
+        node.prediction_particles = [
+            {
+                "id": "prediction_particle_removed",
+                "x": 0.0,
+                "y": 0.0,
+                "initial_x": 0.0,
+                "initial_y": 0.0,
+                "material": "plastic",
+                "vx": 0.0,
+                "vy": 0.0,
+                "ax": 0.0,
+                "ay": 0.0,
+                "status": "active",
+            },
+            {
+                "id": "prediction_particle_other",
+                "x": 1.0,
+                "y": 0.0,
+                "initial_x": 1.0,
+                "initial_y": 0.0,
+                "material": "wood",
+                "vx": 0.0,
+                "vy": 0.0,
+                "ax": 0.0,
+                "ay": 0.0,
+                "status": "active",
+            },
+        ]
+
+        node._collection_event_cb(self._string_msg({
+            "stamp": "hole-test",
+            "location": {"x": 0.0, "y": 0.0},
+            "count": 1,
+        }))
+        node.prediction_particles = [
+            particle for particle in node.prediction_particles
+            if particle["status"] == "active"
+        ] + [{
+            "id": "prediction_particle_back_in_cell",
+            "x": 0.0,
+            "y": 0.0,
+            "initial_x": 0.0,
+            "initial_y": 0.0,
+            "material": "unknown",
+            "vx": 0.0,
+            "vy": 0.0,
+            "ax": 0.0,
+            "ay": 0.0,
+            "status": "active",
+        }]
+        node._publish()
+
+        density = json.loads(node.density_pub.messages[-1].data)
+        cells = {cell["x"]: cell["density"] for cell in density["density_cells"]}
+        self.assertGreater(cells[0.0], 0.0)
+        self.assertGreater(cells[1.0], 0.0)
+        self.assertAlmostEqual(sum(cells.values()), 1.0, places=5)
 
     def test_debris_prediction_material_prior_starts_unknown(self):
         module = importlib.import_module("my_tb3_world.debris_prediction_node")
@@ -1040,11 +1509,24 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         module = importlib.import_module("my_tb3_world.debris_prediction_node")
         node = module.DebrisPredictionNode()
         node.prediction_particles = []
+        node.material_evidence = {"plastic": 4, "wood": 2, "metal": 1}
+        node._material_weights = node._material_belief_weights()
 
         node._debug_reset_cb(self._string_msg({"scope": "prediction"}))
+        node._publish()
 
+        dashboard = json.loads(node.prediction_dashboard_pub.messages[-1].data)
         self.assertEqual(len(node.prediction_particles), 100)
         self.assertTrue(all(p["status"] == "active" for p in node.prediction_particles))
+        self.assertEqual(
+            dashboard["material_belief"]["evidence"],
+            {"plastic": 0, "wood": 0, "metal": 0},
+        )
+        self.assertEqual(dashboard["material_belief"]["probabilities"]["unknown"], 1.0)
+        self.assertTrue(all(
+            particle["material"] == "unknown"
+            for particle in dashboard["prediction_particles"]
+        ))
 
     def test_field_planner_targets_best_density_cell_without_cluster_fields(self):
         module = importlib.import_module("my_tb3_world.field_planner_node")
@@ -1068,12 +1550,15 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         node._plan()
 
         self.assertEqual(node.goal_pub.topic, "/next_cell_goal")
+        self.assertEqual(node.goal_pub.qos["durability"], "transient_local")
+        self.assertEqual(node.goal_pub.qos["reliability"], "reliable")
         goal = json.loads(node.goal_pub.messages[-1].data)
         self.assertEqual(goal["mode"], "cleanup")
         self.assertEqual(goal["status"], "selected")
         self.assertEqual(goal["goal"]["x"], 3.0)
         self.assertEqual(goal["goal"]["y"], 0.0)
         self.assertEqual(goal["goal"]["frame_id"], "map")
+        self.assertNotIn("cell_id", goal["goal"])
         self.assertEqual(goal["reason"], "highest utility reachable cell with return reserve")
         self.assertTrue(goal["return_feasible"])
         self.assertEqual(
@@ -1089,6 +1574,65 @@ class MyTb3WorldNodeTests(unittest.TestCase):
             },
         )
         self.assertGreater(goal["components"]["density_reward"], goal["components"]["travel_cost"])
+
+    def test_field_planner_rejects_density_cells_blocked_in_twin_map(self):
+        module = importlib.import_module("my_tb3_world.field_planner_node")
+        node = module.FieldPlannerNode()
+        node._twin_state_cb(self._string_msg({
+            "robot": {
+                "pose": {"x": 0.0, "y": 0.0},
+                "fuel_level": 1.0,
+                "storage_fill": 0.0,
+            },
+            "map": {
+                "known_area_ratio": 1.0,
+                "cells": [
+                    {"x": 1.0, "y": 0.0, "occupancy": "blocked"},
+                    {"x": 2.0, "y": 0.0, "occupancy": "unknown"},
+                    {"x": 3.0, "y": 0.0, "occupancy": "free"},
+                ],
+            },
+        }))
+        node._density_map_cb(self._string_msg({
+            "schema": "dtas.debris_density_map.v1",
+            "prediction_counts": {"active": 100},
+            "density_cells": [
+                {"x": 1.0, "y": 0.0, "density": 0.95},
+                {"x": 2.0, "y": 0.0, "density": 0.9},
+                {"x": 3.0, "y": 0.0, "density": 0.4},
+            ],
+        }))
+
+        node._plan()
+
+        goal = json.loads(node.goal_pub.messages[-1].data)
+        self.assertEqual(goal["mode"], "cleanup")
+        self.assertEqual(goal["goal"]["x"], 3.0)
+        self.assertEqual(goal["goal"]["y"], 0.0)
+        self.assertNotIn("cell_id", goal["goal"])
+
+    def test_field_planner_suppresses_duplicate_goal_publications(self):
+        module = importlib.import_module("my_tb3_world.field_planner_node")
+        node = module.FieldPlannerNode()
+        node._twin_state_cb(self._string_msg({
+            "robot": {
+                "pose": {"x": 0.0, "y": 0.0},
+                "fuel_level": 1.0,
+                "storage_fill": 0.0,
+            },
+        }))
+        node._density_map_cb(self._string_msg({
+            "schema": "dtas.debris_density_map.v1",
+            "prediction_counts": {"active": 100},
+            "density_cells": [
+                {"x": 1.0, "y": 0.0, "density": 0.8},
+            ],
+        }))
+
+        node._plan()
+        node._plan()
+
+        self.assertEqual(len(node.goal_pub.messages), 1)
 
     def test_field_planner_idles_from_prediction_count_not_legacy_clusters(self):
         module = importlib.import_module("my_tb3_world.field_planner_node")
@@ -1144,6 +1688,315 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertEqual(goal["goal"]["yaw"], 0.4)
         self.assertEqual(goal["reason"], "fuel low")
         self.assertIn("return_cost", goal["components"])
+
+    def test_dashboard_web_state_merges_planner_intent_debug_only(self):
+        module = importlib.import_module("tools.debris_dashboard_web")
+        state = module.DashboardState()
+        state.set_payload({
+            "schema": "dtas.dashboard.v1",
+            "status": "ready",
+            "physical_particles": [{"id": "physical_particle_001"}],
+            "robot": {"pose": {"x": 0.0, "y": 0.0}},
+        })
+        state.set_prediction({
+            "schema": "dtas.debris_density_map.v1",
+            "density_cells": [{"x": 1.0, "y": 1.0, "density": 1.0}],
+            "prediction_counts": {"active": 100},
+        })
+        state.set_planner_intent({
+            "schema": "dtas.next_cell_goal.v1",
+            "stamp": "planner-stamp",
+            "source": "field_planner_node",
+            "status": "selected",
+            "mode": "cleanup",
+            "goal": {"frame_id": "map", "x": 1.0, "y": 1.0, "yaw": 0.0},
+            "utility": 0.72,
+            "return_feasible": True,
+            "reason": "highest utility reachable cell with return reserve",
+            "components": {"density_reward": 0.9, "travel_cost": 0.18},
+        })
+
+        payload = state.get_payload()
+        planner = payload["planner_intent"]
+        self.assertEqual(payload["physical_particles"][0]["id"], "physical_particle_001")
+        self.assertEqual(payload["prediction"]["density_cells"][0]["density"], 1.0)
+        self.assertEqual(planner["schema"], "dtas.next_cell_goal.v1")
+        self.assertTrue(planner["debug_only"])
+        self.assertTrue(planner["forbidden_as_mission_input"])
+        self.assertFalse(planner["stale"])
+        self.assertEqual(planner["stale_after_sec"], 6.0)
+        self.assertEqual(planner["goal"]["frame_id"], "map")
+        self.assertEqual(planner["goal"]["x"], 1.0)
+        self.assertIn("age_sec", planner)
+
+    def test_dashboard_web_force_toggles_are_independent(self):
+        module = importlib.import_module("tools.debris_dashboard_web")
+
+        self.assertIn("layerCurrent", module.HTML)
+        self.assertIn("layerWind", module.HTML)
+        self.assertIn("layerWave", module.HTML)
+        self.assertIn("layerSum", module.HTML)
+        self.assertIn("current arrows: base flow, noise curl, eddies, shore redirect", module.HTML)
+        self.assertIn("wave arrows: turbulence and tide-height signal", module.HTML)
+        self.assertIn("if (layers.current)", module.HTML)
+        self.assertIn("if (layers.wind)", module.HTML)
+        self.assertIn("if (layers.wave)", module.HTML)
+        self.assertIn("if (layers.sum)", module.HTML)
+
+    def test_digital_side_loop_outputs_next_cell_goal_without_debug_inputs(self):
+        twin_module = importlib.import_module("my_tb3_world.digital_twin_state_node")
+        prediction_module = importlib.import_module("my_tb3_world.debris_prediction_node")
+        planner_module = importlib.import_module("my_tb3_world.field_planner_node")
+
+        twin = twin_module.DigitalTwinStateNode()
+        twin.cell_size = 1.0
+        twin._map_cb(FakeOccupancyGrid(
+            width=4,
+            height=1,
+            resolution=1.0,
+            origin_x=0.0,
+            origin_y=0.0,
+            data=[0, 0, 100, 0],
+        ))
+        twin._env_obs_cb(self._string_msg({
+            "environment_status": "ready",
+            "environment_source": "integration_fixture",
+            "cells": [
+                {
+                    "x": 0.5,
+                    "y": 0.5,
+                    "occupancy": "free",
+                    "current_x": 0.0,
+                    "current_y": 0.0,
+                    "wind_x": 0.0,
+                    "wind_y": 0.0,
+                    "wave_height": 0.1,
+                    "density": 0.99,
+                    "physical_particles": [{"id": "hidden_truth_particle"}],
+                },
+                {
+                    "x": 1.5,
+                    "y": 0.5,
+                    "occupancy": "free",
+                    "current_x": 0.0,
+                    "current_y": 0.0,
+                    "wind_x": 0.0,
+                    "wind_y": 0.0,
+                    "wave_height": 0.1,
+                },
+                {
+                    "x": 2.5,
+                    "y": 0.5,
+                    "occupancy": "blocked",
+                    "has_environment": False,
+                },
+                {
+                    "x": 3.5,
+                    "y": 0.5,
+                    "occupancy": "free",
+                    "current_x": 0.0,
+                    "current_y": 0.0,
+                    "wind_x": 0.0,
+                    "wind_y": 0.0,
+                    "wave_height": 0.1,
+                },
+            ],
+            "density_cells": [{"x": 0.5, "y": 0.5, "density": 1.0}],
+            "physical_particles": [{"id": "hidden_truth_particle"}],
+        }))
+        twin._robot_state_cb(self._string_msg({
+            "schema": "dtas.robot_state.v1",
+            "pose": {"x": 0.5, "y": 0.5, "yaw": 0.0},
+            "fuel_level": 1.0,
+            "storage_fill": 0.0,
+            "storage_count": 0,
+            "storage_capacity": 100,
+        }))
+        twin._base_pose_cb(self._string_msg({
+            "schema": "dtas.base_pose.v1",
+            "pose": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+            "status": "known",
+        }))
+        twin._collection_event_cb(self._string_msg({
+            "stamp": "integration-event",
+            "location": {"x": 0.5, "y": 0.5},
+            "count": 1,
+            "materials": {"plastic": 1},
+        }))
+        twin._publish()
+
+        twin_msg = twin.twin_pub.messages[-1]
+        twin_state = json.loads(twin_msg.data)
+        self.assertEqual(twin_state["sync_status"], "ready")
+        self.assertEqual(twin_state["material_evidence"]["plastic"], 1)
+        self.assertNotIn("density_cells", twin_state)
+        self.assertNotIn("physical_particles", twin_state)
+        self.assertEqual(twin_state["map"]["cells"][2]["occupancy"], "blocked")
+
+        prediction = prediction_module.DebrisPredictionNode()
+        prediction.prediction_debris_count = 4
+        prediction.prediction_drift_enabled = False
+        prediction._twin_state_cb(twin_msg)
+        prediction.prediction_particles = [
+            {
+                "id": "prediction_particle_near",
+                "x": 0.5,
+                "y": 0.5,
+                "initial_x": 0.5,
+                "initial_y": 0.5,
+                "material": "plastic",
+                "vx": 0.0,
+                "vy": 0.0,
+                "ax": 0.0,
+                "ay": 0.0,
+                "status": "active",
+            },
+        ] + [
+            {
+                "id": f"prediction_particle_far_{index}",
+                "x": 3.5,
+                "y": 0.5,
+                "initial_x": 3.5,
+                "initial_y": 0.5,
+                "material": "plastic",
+                "vx": 0.0,
+                "vy": 0.0,
+                "ax": 0.0,
+                "ay": 0.0,
+                "status": "active",
+            }
+            for index in range(3)
+        ]
+        prediction._publish()
+
+        density_msg = prediction.density_pub.messages[-1]
+        density = json.loads(density_msg.data)
+        density_by_x = {cell["x"]: cell["density"] for cell in density["density_cells"]}
+        self.assertEqual(density["schema"], "dtas.debris_density_map.v1")
+        self.assertEqual(density["status"], "ready")
+        self.assertNotIn(2.5, density_by_x)
+        self.assertGreater(density_by_x[3.5], density_by_x[0.5])
+        self.assertAlmostEqual(sum(density_by_x.values()), 1.0, places=5)
+        self.assertNotIn("prediction_particles", density)
+
+        prediction_dashboard = json.loads(
+            prediction.prediction_dashboard_pub.messages[-1].data
+        )
+        self.assertTrue(prediction_dashboard["debug_only"])
+        self.assertIn("prediction_particles", prediction_dashboard)
+
+        planner = planner_module.FieldPlannerNode()
+        planner_topics = {subscription["topic"] for subscription in planner.subscriptions}
+        self.assertEqual(planner_topics, {"/twin_state", "/debris_density_map"})
+        planner._twin_state_cb(twin_msg)
+        planner._density_map_cb(density_msg)
+        planner._plan()
+
+        goal = json.loads(planner.goal_pub.messages[-1].data)
+        self.assertEqual(goal["schema"], "dtas.next_cell_goal.v1")
+        self.assertEqual(goal["mode"], "cleanup")
+        self.assertEqual(goal["goal"]["frame_id"], "map")
+        self.assertEqual(goal["goal"]["x"], 3.5)
+        self.assertEqual(goal["goal"]["y"], 0.5)
+        self.assertNotIn("cell_id", goal["goal"])
+
+    def test_mission_planner_converts_cleanup_goal_to_nav2_pose(self):
+        module = importlib.import_module("my_tb3_world.mission_planner_node")
+        node = module.MissionPlannerNode()
+
+        node._goal_cb(self._string_msg({
+            "schema": "dtas.next_cell_goal.v1",
+            "status": "selected",
+            "mode": "cleanup",
+            "goal": {
+                "frame_id": "map",
+                "x": 1.25,
+                "y": -0.5,
+                "yaw": 0.4,
+            },
+        }))
+
+        self.assertTrue(node.waited_for_nav2)
+        self.assertEqual(len(node.nav_to_pose_client.goals), 1)
+        goal = node.nav_to_pose_client.goals[-1]
+        self.assertEqual(goal.pose.header.frame_id, "map")
+        self.assertEqual(goal.pose.pose.position.x, 1.25)
+        self.assertEqual(goal.pose.pose.position.y, -0.5)
+        self.assertAlmostEqual(goal.pose.pose.orientation.z, math.sin(0.2))
+        self.assertAlmostEqual(goal.pose.pose.orientation.w, math.cos(0.2))
+
+    def test_mission_planner_return_to_base_uses_twin_state_base_pose(self):
+        module = importlib.import_module("my_tb3_world.mission_planner_node")
+        node = module.MissionPlannerNode()
+        node._twin_state_cb(self._string_msg({
+            "base": {
+                "pose": {
+                    "x": -1.2,
+                    "y": 0.8,
+                    "yaw": -0.3,
+                }
+            }
+        }))
+
+        node._goal_cb(self._string_msg({
+            "schema": "dtas.next_cell_goal.v1",
+            "status": "active",
+            "mode": "return_to_base",
+            "goal": {
+                "frame_id": "map",
+                "x": 9.0,
+                "y": 9.0,
+                "yaw": 9.0,
+            },
+        }))
+
+        goal = node.nav_to_pose_client.goals[-1]
+        self.assertEqual(goal.pose.pose.position.x, -1.2)
+        self.assertEqual(goal.pose.pose.position.y, 0.8)
+        self.assertAlmostEqual(goal.pose.pose.orientation.z, math.sin(-0.15))
+        self.assertAlmostEqual(goal.pose.pose.orientation.w, math.cos(-0.15))
+
+    def test_mission_planner_ignores_idle_goal(self):
+        module = importlib.import_module("my_tb3_world.mission_planner_node")
+        node = module.MissionPlannerNode()
+
+        node._goal_cb(self._string_msg({
+            "schema": "dtas.next_cell_goal.v1",
+            "status": "idle",
+            "mode": "idle",
+        }))
+
+        self.assertEqual(node.nav_to_pose_client.goals, [])
+
+    def test_mission_planner_rejects_invalid_cleanup_goal(self):
+        module = importlib.import_module("my_tb3_world.mission_planner_node")
+        node = module.MissionPlannerNode()
+
+        node._goal_cb(self._string_msg({
+            "schema": "dtas.next_cell_goal.v1",
+            "status": "selected",
+            "mode": "cleanup",
+            "goal": {
+                "frame_id": "odom",
+                "x": 1.0,
+                "y": 2.0,
+                "yaw": 0.0,
+            },
+        }))
+        node._goal_cb(self._string_msg({
+            "schema": "dtas.next_cell_goal.v1",
+            "status": "selected",
+            "mode": "cleanup",
+            "goal": {
+                "frame_id": "map",
+                "x": "bad",
+                "y": 2.0,
+                "yaw": 0.0,
+            },
+        }))
+
+        self.assertEqual(node.nav_to_pose_client.goals, [])
+        self.assertEqual(len(node.logger.errors), 2)
 
     def test_publisher_publishes_forward_velocity(self):
         module = importlib.import_module("my_tb3_world.publisher_node")
@@ -1252,6 +2105,9 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertEqual(dashboard["physical_debris"]["model"], "particles")
         self.assertEqual(dashboard["collection_radius_m"], module.COLLECTION_RADIUS_M)
         self.assertEqual(dashboard["physical_debris"]["target_active_count"], 100)
+        self.assertEqual(dashboard["physical_debris"]["material_response"]["plastic"]["wind"], 0.65)
+        self.assertEqual(dashboard["physical_debris"]["boid_rules"]["neighbor_radius_m"], 0.3)
+        self.assertEqual(dashboard["physical_debris"]["boid_rules"]["water_damping"], 0.65)
         self.assertEqual(dashboard["collected_count"], 0)
         self.assertEqual(dashboard["remaining_count"], 100)
         self.assertEqual(dashboard["washed_out_count"], 0)
@@ -1265,6 +2121,21 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertEqual(dashboard["environment"]["environment_cell_count"], 400)
         observation = json.loads(node.env_pub.messages[-1].data)
         self.assertNotIn("physical_particles", observation)
+
+    def test_environment_node_dashboard_reports_debris_motion_parameters(self):
+        module = importlib.import_module("my_tb3_world.environment_node")
+        node = module.EnvironmentNode()
+        node.parameters["debris_material.plastic.wind"] = 0.9
+        node.parameters["debris_boid.neighbor_radius_m"] = 0.7
+        node.parameters["debris_boid.water_damping"] = 0.8
+
+        node._odom_cb(self._odom_at(9.0, 9.0))
+        node._tick()
+
+        dashboard = self._latest_dashboard(node)
+        self.assertEqual(dashboard["physical_debris"]["material_response"]["plastic"]["wind"], 0.9)
+        self.assertEqual(dashboard["physical_debris"]["boid_rules"]["neighbor_radius_m"], 0.7)
+        self.assertEqual(dashboard["physical_debris"]["boid_rules"]["water_damping"], 0.8)
 
     def test_environment_node_dashboard_uses_service_field_when_available(self):
         module = importlib.import_module("my_tb3_world.environment_node")
@@ -1454,6 +2325,7 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         module = importlib.import_module("my_tb3_world.environment_node")
         node = module.EnvironmentNode()
         node.debris_drift_enabled = False
+        node._collection_resume_time = -1.0
 
         node._tick()
         dashboard = self._latest_dashboard(node)
@@ -1511,6 +2383,38 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertEqual(dashboard["collected_count"], 2)
         self.assertEqual(dashboard["remaining_count"], 100)
         self.assertEqual(dashboard["physical_debris"]["lifetime_counts"]["respawned"], 100)
+
+    def test_environment_node_reset_grace_prevents_immediate_collection(self):
+        module = importlib.import_module("my_tb3_world.environment_node")
+        node = module.EnvironmentNode()
+        node.debris_drift_enabled = False
+        node.collection_radius = 0.25
+        node.particles = [
+            {
+                "id": "physical_particle_grace",
+                "x": 1.0,
+                "y": 1.0,
+                "initial_x": 1.0,
+                "initial_y": 1.0,
+                "material": "plastic",
+                "vx": 0.0,
+                "vy": 0.0,
+                "ax": 0.0,
+                "ay": 0.0,
+                "status": "active",
+            },
+        ]
+        node._odom_cb(self._odom_at(1.0, 1.0))
+
+        node._collection_resume_time = 1.0
+        node._check_collections()
+        self.assertEqual(node.collection_pub.messages, [])
+        self.assertEqual(node.particles[0]["status"], "active")
+
+        node._collection_resume_time = -1.0
+        node._check_collections()
+        event = json.loads(node.collection_pub.messages[-1].data)
+        self.assertEqual(event["count"], 1)
 
 
 if __name__ == "__main__":

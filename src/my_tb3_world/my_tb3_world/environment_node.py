@@ -17,6 +17,8 @@ from my_tb3_world.environment_field import (
 from my_tb3_world.debris_particles import (
     MATERIALS,
     advance_particle,
+    debris_motion_from_parameters,
+    declare_debris_motion_parameters,
     normalize_material,
     particle_counts,
     public_particle,
@@ -28,7 +30,9 @@ from my_tb3_world_interfaces.srv import GenerateEnvironmentField
 CELL_SIZE = DEFAULT_CELL_SIZE
 COLLECTION_RADIUS_M = 0.2
 PHYSICAL_DEBRIS_COUNT = 100
+DEBRIS_DRIFT_SCALE = 0.015
 MAX_RECENT_EVENTS = 30
+RESET_COLLECTION_GRACE_SEC = 8.0
 
 
 class EnvironmentNode(Node):
@@ -38,8 +42,9 @@ class EnvironmentNode(Node):
         self.declare_parameter('cell_size_m', CELL_SIZE)
         self.declare_parameter('tick_rate_hz', 1.0)
         self.declare_parameter('debris_drift_enabled', True)
-        self.declare_parameter('debris_drift_scale', 0.1)
+        self.declare_parameter('debris_drift_scale', DEBRIS_DRIFT_SCALE)
         self.declare_parameter('physical_debris_seed', 23)
+        declare_debris_motion_parameters(self)
 
         self.cell_size = self.get_parameter('cell_size_m').value
         self.collection_radius = COLLECTION_RADIUS_M
@@ -47,6 +52,7 @@ class EnvironmentNode(Node):
         self.debris_drift_scale = self.get_parameter('debris_drift_scale').value
         self.physical_debris_count = PHYSICAL_DEBRIS_COUNT
         self.physical_debris_seed = self.get_parameter('physical_debris_seed').value
+        self.material_response, self.boid_rules = debris_motion_from_parameters(self)
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(Odometry, '/odom', self._odom_cb, qos)
@@ -71,6 +77,7 @@ class EnvironmentNode(Node):
         self._next_particle_index = 1
         self._event_counts = {'collected': 0, 'washed_out': 0, 'respawned': 0}
         self._recent_events = []
+        self._collection_resume_time = self._field_time_sec() + RESET_COLLECTION_GRACE_SEC
         self.particles = self._new_physical_particles(self.physical_debris_count)
         self._env_cells = observation_cells(self._field_cells)
         self._env_source = 'preset_fallback'
@@ -104,6 +111,7 @@ class EnvironmentNode(Node):
         self.pose_received = False
         self.robot_x = 0.0
         self.robot_y = 0.0
+        self._collection_resume_time = self._field_time_sec() + RESET_COLLECTION_GRACE_SEC
         self.get_logger().info('Physical debris particles reset')
 
     def _debug_reset_cb(self, msg: String):
@@ -114,8 +122,23 @@ class EnvironmentNode(Node):
         if payload.get('scope', 'all') in ('all', 'physical'):
             self._reset_physical_particles()
 
+    def _field_time_sec(self):
+        now = self.get_clock().now().to_msg()
+        return now.sec + now.nanosec / 1_000_000_000.0
+
+    def _field_time_controls(self):
+        return {'field_time_sec': self._field_time_sec()}
+
+    def _refresh_fallback_field(self):
+        self._field_cells = build_environment_cells(
+            None,
+            self.cell_size,
+            self._field_time_controls(),
+        )
+        self._env_cells = observation_cells(self._field_cells)
+
     def _build_env_cells(self):
-        """Static ocean current/wind/wave grid over the arena."""
+        """Build fallback ocean current/wind/wave grid over the arena."""
         return observation_cells(build_environment_cells(None, self.cell_size))
 
     def _odom_cb(self, msg: Odometry):
@@ -124,6 +147,8 @@ class EnvironmentNode(Node):
         self.pose_received = True
 
     def _check_collections(self):
+        if self._field_time_sec() < self._collection_resume_time:
+            return
         collected_particles = []
         for particle in self.particles:
             if particle['status'] != 'active':
@@ -184,6 +209,8 @@ class EnvironmentNode(Node):
                 self.particles,
                 field_cell,
                 self.debris_drift_scale,
+                self.material_response,
+                self.boid_rules,
             )
             if not self._is_free_position(next_state['x'], next_state['y']):
                 particle['status'] = 'washed_out'
@@ -273,7 +300,7 @@ class EnvironmentNode(Node):
         request = GenerateEnvironmentField.Request()
         request.frame_id = 'map'
         request.cell_size_m = self.cell_size
-        request.generation_controls_json = ''
+        request.generation_controls_json = json.dumps(self._field_time_controls())
         self._pending_field_request = self.environment_client.call_async(request)
 
     def _poll_environment_field(self):
@@ -369,6 +396,8 @@ class EnvironmentNode(Node):
                 'counts': counts,
                 'lifetime_counts': dict(self._event_counts),
                 'material_counts': material_counts,
+                'material_response': self.material_response,
+                'boid_rules': self.boid_rules,
             },
             'physical_particles': particles,
             'physical_events': list(self._recent_events),
@@ -381,7 +410,10 @@ class EnvironmentNode(Node):
         self.dashboard_pub.publish(msg)
 
     def _tick(self):
+        self.material_response, self.boid_rules = debris_motion_from_parameters(self)
         self._poll_environment_field()
+        if self._env_source == 'preset_fallback' and self._field_service_available:
+            self._refresh_fallback_field()
         self._request_environment_field()
         self._advance_debris_truth()
 

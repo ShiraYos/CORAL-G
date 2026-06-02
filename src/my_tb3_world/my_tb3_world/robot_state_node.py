@@ -29,6 +29,7 @@ class RobotStateNode(Node):
         self.create_subscription(Odometry, '/odom', self._odom_cb, qos)
         self.create_subscription(String, '/collection_event', self._collection_event_cb, 10)
         self.create_subscription(String, '/base_pose', self._base_pose_cb, 10)
+        self.create_subscription(String, '/debug_reset', self._debug_reset_cb, 10)
 
         self.state_pub = self.create_publisher(String, '/robot_state', 10)
 
@@ -104,6 +105,18 @@ class RobotStateNode(Node):
         self.base_y = pose.get('y', 0.0)
         self.base_yaw = pose.get('yaw', 0.0)
         self.base_status = data.get('status', 'known')
+
+    def _debug_reset_cb(self, msg: String):
+        try:
+            payload = json.loads(msg.data)
+        except json.JSONDecodeError:
+            payload = {}
+        if payload.get('scope', 'all') not in ('all', 'robot'):
+            return
+        self.storage_count = 0
+        self.fuel_pct = 100.0
+        self.fuel_low = False
+        self.get_logger().info('Robot debug state reset')
 
     def _drain_fuel(self):
         if self.fuel_pct > 0.0:

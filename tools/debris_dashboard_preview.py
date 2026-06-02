@@ -6,10 +6,7 @@ import time
 
 
 DEMO_ODOM_POINTS = [
-    ('away_from_debris', 0.0, 0.0),
-    ('cluster_1', 0.88, 1.04),
-    ('cluster_2', -1.2, -1.2),
-    ('cluster_3', -1.2, 1.2),
+    ('water_test_position', 0.3, 0.9),
 ]
 
 
@@ -110,11 +107,9 @@ def main():
                 continue
 
             now = time.monotonic()
-            if next_demo_index >= len(DEMO_ODOM_POINTS):
-                continue
-
-            label, x, y = DEMO_ODOM_POINTS[next_demo_index]
-            if current_demo_started == 0.0:
+            hold_last = next_demo_index >= len(DEMO_ODOM_POINTS)
+            label, x, y = DEMO_ODOM_POINTS[-1 if hold_last else next_demo_index]
+            if current_demo_started == 0.0 and not hold_last:
                 current_demo_started = now
                 print(f'\n[demo_odom] {label}: x={x} y={y}', flush=True)
 
@@ -126,7 +121,7 @@ def main():
                 odom_pub.publish(odom)
                 last_demo_publish = now
 
-            if now - current_demo_started < args.interval_sec:
+            if hold_last or now - current_demo_started < args.interval_sec:
                 continue
 
             next_demo_index += 1

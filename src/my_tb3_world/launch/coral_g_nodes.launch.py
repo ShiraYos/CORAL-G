@@ -77,7 +77,7 @@ def generate_launch_description():
                 'cell_size_m': 0.5,
                 'tick_rate_hz': 1.0,
                 'debris_drift_enabled': True,
-                'debris_drift_scale': 0.1,
+                'debris_drift_scale': 0.015,
                 'physical_debris_seed': 23,
             }],
         ),
@@ -106,7 +106,7 @@ def generate_launch_description():
                 'simulation_horizon_sec': 60.0,
                 'random_seed': 23,
                 'prediction_drift_enabled': True,
-                'prediction_drift_scale': 0.1,
+                'prediction_drift_scale': 0.015,
             }],
         ),
 

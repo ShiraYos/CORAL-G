@@ -20,6 +20,7 @@ import math
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 
@@ -61,7 +62,12 @@ class FieldPlannerNode(Node):
         self.create_subscription(String, '/twin_state', self._twin_state_cb, 10)
         self.create_subscription(String, '/debris_density_map', self._density_map_cb, 10)
 
-        self.goal_pub = self.create_publisher(String, '/next_cell_goal', 10)
+        goal_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.goal_pub = self.create_publisher(String, '/next_cell_goal', goal_qos)
 
         rate = float(self.get_parameter('plan_rate_hz').value)
         self.create_timer(1.0 / rate, self._plan)
@@ -109,6 +115,19 @@ class FieldPlannerNode(Node):
     def _map_confidence(self):
         twin_map = self.twin_state.get('map', {})
         return max(0.0, min(float(twin_map.get('known_area_ratio', 1.0)), 1.0))
+
+    def _map_cell_lookup(self):
+        cells = self.twin_state.get('map', {}).get('cells', [])
+        return {
+            (round(cell.get('x', 0.0), 3), round(cell.get('y', 0.0), 3)): cell
+            for cell in cells
+        }
+
+    def _is_allowed_density_cell(self, cell, map_lookup):
+        if not map_lookup:
+            return True
+        twin_cell = map_lookup.get((round(cell.get('x', 0.0), 3), round(cell.get('y', 0.0), 3)))
+        return bool(twin_cell and twin_cell.get('occupancy') == 'free')
 
     def _normalized_distance(self, ax, ay, bx, by):
         return min(math.sqrt((ax - bx) ** 2 + (ay - by) ** 2) / _MAX_ARENA_DIST, 1.0)
@@ -195,7 +214,10 @@ class FieldPlannerNode(Node):
             best_cell = None
             best_utility = -1.0
             best_score = None
+            map_lookup = self._map_cell_lookup()
             for cell in self._density_cells():
+                if not self._is_allowed_density_cell(cell, map_lookup):
+                    continue
                 score = self._score_cell(
                     cell,
                     robot_x,

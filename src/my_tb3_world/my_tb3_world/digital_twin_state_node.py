@@ -14,6 +14,29 @@ from my_tb3_world.environment_field import DEFAULT_CELL_SIZE, build_map_cells
 MAX_COLLECTION_HISTORY = 20
 
 
+def _environment_cells_as_map_cells(env_cells):
+    cells = []
+    for cell in env_cells:
+        has_environment = bool(cell.get(
+            'has_environment',
+            'current_x' in cell and 'current_y' in cell,
+        ))
+        occupancy = cell.get('occupancy', 'free' if has_environment else 'unknown')
+        merged = {
+            'x': cell.get('x', 0.0),
+            'y': cell.get('y', 0.0),
+            'occupancy': 'free' if has_environment else occupancy,
+        }
+        if has_environment:
+            merged['current_x'] = cell.get('current_x', 0.0)
+            merged['current_y'] = cell.get('current_y', 0.0)
+            merged['wind_x'] = cell.get('wind_x', 0.0)
+            merged['wind_y'] = cell.get('wind_y', 0.0)
+            merged['wave_height'] = cell.get('wave_height', 0.0)
+        cells.append(merged)
+    return cells
+
+
 class DigitalTwinStateNode(Node):
     def __init__(self):
         super().__init__('digital_twin_state_node')
@@ -41,6 +64,7 @@ class DigitalTwinStateNode(Node):
         self.create_subscription(String, '/environment_observation', self._env_obs_cb, 10)
         self.create_subscription(String, '/base_pose', self._base_pose_cb, 10)
         self.create_subscription(String, '/collection_event', self._collection_event_cb, 10)
+        self.create_subscription(String, '/debug_reset', self._debug_reset_cb, 10)
         self.create_subscription(OccupancyGrid, '/map', self._map_cb, map_qos)
 
         self.twin_pub = self.create_publisher(String, '/twin_state', 10)
@@ -91,6 +115,17 @@ class DigitalTwinStateNode(Node):
             f'Collection event recorded — material_evidence so far: {self.material_evidence}'
         )
 
+    def _debug_reset_cb(self, msg: String):
+        try:
+            payload = json.loads(msg.data)
+        except json.JSONDecodeError:
+            payload = {}
+        if payload.get('scope', 'all') not in ('all', 'twin', 'digital_twin'):
+            return
+        self.collection_events = []
+        self.material_evidence = {material: 0 for material in MATERIALS}
+        self.get_logger().info('Digital twin collection evidence reset')
+
     def _map_cb(self, msg: OccupancyGrid):
         """Convert OccupancyGrid to map-derived simulation grid cells."""
         cells = build_map_cells(msg, self.cell_size)
@@ -130,22 +165,25 @@ class DigitalTwinStateNode(Node):
             key = (round(cell['x'], 1), round(cell['y'], 1))
             env_cells_by_pos[key] = cell
 
-        map_cells_with_env = []
-        for cell in self.map_cells:
-            key = (round(cell['x'], 1), round(cell['y'], 1))
-            env_data = env_cells_by_pos.get(key, {})
-            merged = dict(cell)
-            if cell['occupancy'] == 'free' and env_data:
-                merged['current_x'] = env_data.get('current_x', 0.0)
-                merged['current_y'] = env_data.get('current_y', 0.0)
-                merged['wind_x'] = env_data.get('wind_x', 0.0)
-                merged['wind_y'] = env_data.get('wind_y', 0.0)
-                merged['wave_height'] = env_data.get('wave_height', 0.0)
-            map_cells_with_env.append(merged)
+        if self.map_cells:
+            map_cells_with_env = []
+            for cell in self.map_cells:
+                key = (round(cell['x'], 1), round(cell['y'], 1))
+                env_data = env_cells_by_pos.get(key, {})
+                merged = dict(cell)
+                if cell['occupancy'] == 'free' and env_data:
+                    merged['current_x'] = env_data.get('current_x', 0.0)
+                    merged['current_y'] = env_data.get('current_y', 0.0)
+                    merged['wind_x'] = env_data.get('wind_x', 0.0)
+                    merged['wind_y'] = env_data.get('wind_y', 0.0)
+                    merged['wave_height'] = env_data.get('wave_height', 0.0)
+                map_cells_with_env.append(merged)
+        else:
+            map_cells_with_env = _environment_cells_as_map_cells(env.get('cells', []))
 
-        known = [c for c in self.map_cells if c['occupancy'] != 'unknown']
-        blocked = [c for c in self.map_cells if c['occupancy'] == 'blocked']
-        total = len(self.map_cells) if self.map_cells else 1
+        known = [c for c in map_cells_with_env if c['occupancy'] != 'unknown']
+        blocked = [c for c in map_cells_with_env if c['occupancy'] == 'blocked']
+        total = len(map_cells_with_env) if map_cells_with_env else 1
 
         twin_state = {
             'schema': 'dtas.twin_state.v1',

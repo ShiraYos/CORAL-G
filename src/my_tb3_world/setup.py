@@ -18,7 +18,7 @@ setup(
         (os.path.join('share', package_name, 'params'), glob('params/*.yaml')),
         (os.path.join('share', package_name, 'maps'), glob('maps/*')),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'opensimplex>=0.4.5'],
     zip_safe=True,
     maintainer='test',
     maintainer_email='test@todo.todo',

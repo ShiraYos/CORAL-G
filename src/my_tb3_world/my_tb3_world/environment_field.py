@@ -3,32 +3,48 @@
 import json
 import math
 
+try:
+    from opensimplex import OpenSimplex
+except ImportError:
+    OpenSimplex = None
+
 
 FALLBACK_MAP_MIN = -2.0
 FALLBACK_MAP_MAX = 2.0
 DEFAULT_CELL_SIZE = 0.2
+_NOISE_SEED = 61403
+_NOISE_GENERATORS = {}
 
 DEFAULT_CONTROLS = {
-    'current_strength': 0.3,
+    'field_time_sec': 0.0,
+    'current_strength': 0.22,
     'current_heading_deg': 45.0,
     'current_spatial_variation': 0.22,
     'current_shear': 0.11,
-    'wind_x': 0.1,
-    'wind_y': 0.05,
-    'wind_spatial_variation': 0.01,
-    'wave_height': 0.2,
-    'wave_spatial_variation': 0.05,
-    'tide_strength': 0.05,
+    'current_temporal_variation': 0.08,
+    'current_noise_scale_m': 1.35,
+    'current_noise_strength': 0.28,
+    'current_noise_time_scale': 0.025,
+    'current_noise_delta_m': 0.18,
+    'wind_x': 0.18,
+    'wind_y': 0.09,
+    'wind_spatial_variation': 0.015,
+    'wave_height': 0.32,
+    'wave_spatial_variation': 0.08,
+    'tide_strength': 0.07,
     'tide_heading_deg': 90.0,
     'tide_phase': 0.5,
-    'vortex_strength': 0.48,
+    'vortex_strength': 0.82,
     'vortex_x': 0.0,
     'vortex_y': 0.0,
-    'vortex_radius': 1.05,
-    'vortex2_strength': -0.32,
+    'vortex_radius': 0.82,
+    'vortex2_strength': -0.66,
     'vortex2_x': 1.0,
     'vortex2_y': -1.0,
-    'vortex2_radius': 0.85,
+    'vortex2_radius': 0.68,
+    'eddy_orbit_radius': 0.28,
+    'eddy_pulse_strength': 0.42,
+    'eddy_intensity': 1.35,
     'shore_influence_radius': 0.75,
     'shore_current_tangent': 0.16,
     'shore_current_damping': 0.22,
@@ -70,6 +86,60 @@ def _normalized(value, min_value, max_value):
     return ((value - min_value) / span) * 2.0 - 1.0
 
 
+def _noise_generator(seed):
+    if OpenSimplex is None:
+        return None
+    if seed not in _NOISE_GENERATORS:
+        _NOISE_GENERATORS[seed] = OpenSimplex(seed=seed)
+    return _NOISE_GENERATORS[seed]
+
+
+def _fallback_noise(x, y, z, seed):
+    return math.sin(
+        x * 1.71 +
+        y * 2.23 +
+        z * 1.37 +
+        seed * 0.00031 +
+        0.37 * math.sin(x * 0.53 - y * 0.41 + z)
+    )
+
+
+def _open_simplex_noise(x, y, z=0.0, seed=_NOISE_SEED):
+    generator = _noise_generator(seed)
+    if generator is None:
+        return _fallback_noise(x, y, z, seed)
+    if hasattr(generator, 'noise3'):
+        return generator.noise3(x, y, z)
+    if hasattr(generator, 'noise3d'):
+        return generator.noise3d(x, y, z)
+    if hasattr(generator, 'noise2'):
+        return generator.noise2(x + z * 0.37, y - z * 0.29)
+    return _fallback_noise(x, y, z, seed)
+
+
+def _curl_noise_vector(x, y, controls):
+    scale = max(controls['current_noise_scale_m'], 0.05)
+    delta = max(controls['current_noise_delta_m'], 0.02)
+    phase = controls['field_time_sec'] * controls['current_noise_time_scale']
+
+    def sample(px, py):
+        return _open_simplex_noise(px / scale, py / scale, phase)
+
+    dpsi_dy = (sample(x, y + delta) - sample(x, y - delta)) / (2.0 * delta)
+    dpsi_dx = (sample(x + delta, y) - sample(x - delta, y)) / (2.0 * delta)
+    current_x = dpsi_dy * controls['current_noise_strength']
+    current_y = -dpsi_dx * controls['current_noise_strength']
+    return _limit_vector(current_x, current_y, controls['current_noise_strength'] * 1.6)
+
+
+def _limit_vector(x, y, max_magnitude):
+    magnitude = math.hypot(x, y)
+    if magnitude <= max_magnitude or magnitude <= 0.000001:
+        return x, y
+    scale = max_magnitude / magnitude
+    return x * scale, y * scale
+
+
 def _vortex_vector(x, y, controls, prefix='vortex'):
     strength = controls[f'{prefix}_strength']
     radius = max(controls[f'{prefix}_radius'], 0.001)
@@ -84,6 +154,17 @@ def _vortex_vector(x, y, controls, prefix='vortex'):
     dist = math.sqrt(dist_sq)
     influence = strength * math.exp(-dist_sq / (2.0 * radius * radius))
     return -dy / dist * influence, dx / dist * influence
+
+
+def _dynamic_vortex_controls(controls, prefix, phase, offset):
+    adjusted = dict(controls)
+    orbit = controls['eddy_orbit_radius']
+    pulse = controls['eddy_pulse_strength']
+    base_strength = controls[f'{prefix}_strength']
+    adjusted[f'{prefix}_x'] = controls[f'{prefix}_x'] + orbit * math.sin(phase + offset)
+    adjusted[f'{prefix}_y'] = controls[f'{prefix}_y'] + orbit * math.cos(phase * 0.7 + offset)
+    adjusted[f'{prefix}_strength'] = base_strength * (1.0 + pulse * math.sin(phase * 1.3 + offset))
+    return adjusted
 
 
 def _land_context(map_cell, map_cells, cell_size_m):
@@ -142,51 +223,33 @@ def _apply_land_effects(vector, controls, land):
     current_x = current_x * damping + tangent_x * tangent_sign * controls['shore_current_tangent'] * influence
     current_y = current_y * damping + tangent_y * tangent_sign * controls['shore_current_tangent'] * influence
 
-    wind_damping = 1.0 - controls['shore_wind_damping'] * influence
-    wave_damping = 1.0 - controls['wave_shore_damping'] * influence
-    wave_fetch = controls['wave_fetch_strength'] * (1.0 - influence)
-
     adjusted = dict(vector)
     adjusted['current_x'] = current_x
     adjusted['current_y'] = current_y
-    adjusted['wind_x'] = vector['wind_x'] * wind_damping
-    adjusted['wind_y'] = vector['wind_y'] * wind_damping
-    adjusted['wave_height'] = max(0.0, vector['wave_height'] * wave_damping + wave_fetch)
     return adjusted
 
 
 def environment_vector(controls, x=0.0, y=0.0, bounds=None, land=None):
     controls = {**DEFAULT_CONTROLS, **(controls or {})}
     bounds = bounds or fallback_bounds()
+    phase = float(controls.get('field_time_sec', 0.0)) * 0.045
     heading = math.radians(controls['current_heading_deg'])
     strength = controls['current_strength']
-    base_current_x = strength * math.cos(heading)
-    base_current_y = strength * math.sin(heading)
+    current_x = strength * math.cos(heading)
+    current_y = strength * math.sin(heading)
 
     norm_x = _normalized(x, bounds['min_x'], bounds['max_x'])
     norm_y = _normalized(y, bounds['min_y'], bounds['max_y'])
-    variation = controls['current_spatial_variation']
-    shear = controls['current_shear']
-    current_x = (
-        base_current_x
-        + variation * math.sin((norm_y + 1.0) * math.pi)
-        + shear * norm_y
-    )
-    current_y = (
-        base_current_y
-        + variation * math.cos((norm_x + 1.0) * math.pi)
-        - shear * norm_x * 0.5
-    )
+    noise_x, noise_y = _curl_noise_vector(x, y, controls)
+    current_x += noise_x
+    current_y += noise_y
 
-    tide_heading = math.radians(controls['tide_heading_deg'])
-    tide = controls['tide_strength'] * math.sin(controls['tide_phase'])
-    current_x += tide * math.cos(tide_heading)
-    current_y += tide * math.sin(tide_heading)
-
-    vortex_x, vortex_y = _vortex_vector(x, y, controls, 'vortex')
-    vortex2_x, vortex2_y = _vortex_vector(x, y, controls, 'vortex2')
-    current_x += vortex_x + vortex2_x
-    current_y += vortex_y + vortex2_y
+    vortex_controls = _dynamic_vortex_controls(controls, 'vortex', phase, 0.0)
+    vortex2_controls = _dynamic_vortex_controls(controls, 'vortex2', phase, 2.1)
+    vortex_x, vortex_y = _vortex_vector(x, y, vortex_controls, 'vortex')
+    vortex2_x, vortex2_y = _vortex_vector(x, y, vortex2_controls, 'vortex2')
+    current_x += (vortex_x + vortex2_x) * controls['eddy_intensity']
+    current_y += (vortex_y + vortex2_y) * controls['eddy_intensity']
 
     wind_variation = controls['wind_spatial_variation']
     wind_x = controls['wind_x'] + wind_variation * math.sin(norm_y * math.pi * 0.5)
@@ -196,6 +259,10 @@ def environment_vector(controls, x=0.0, y=0.0, bounds=None, land=None):
         math.sin((norm_x + 1.0) * math.pi) +
         math.cos((norm_y + 1.0) * math.pi)
     ) * 0.5
+    tide = controls['tide_strength'] * (
+        0.5 + 0.5 * math.sin(controls['tide_phase'] + phase * 0.35)
+    )
+    wave += tide
     vector = _apply_land_effects({
         'current_x': current_x,
         'current_y': current_y,

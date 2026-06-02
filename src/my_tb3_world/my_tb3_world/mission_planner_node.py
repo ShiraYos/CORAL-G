@@ -17,6 +17,13 @@ def yaw_to_quaternion(yaw):
     return {'z': math.sin(half_yaw), 'w': math.cos(half_yaw)}
 
 
+def _finite_float(value):
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(value)
+    return number
+
+
 class MissionPlannerNode(BasicNavigator):
     def __init__(self):
         super().__init__(node_name='mission_planner_node')
@@ -73,13 +80,24 @@ class MissionPlannerNode(BasicNavigator):
             return
 
         if mode == 'return_to_base':
-            bx, by, byaw = self._base_from_twin()
+            try:
+                bx, by, byaw = self._base_from_twin()
+            except (TypeError, ValueError):
+                self.get_logger().error('Invalid base pose in /twin_state')
+                return
             self.get_logger().info(f'Return to base: ({bx}, {by})')
         elif mode == 'cleanup':
             goal = data.get('goal', {})
-            bx = float(goal.get('x', 0.0))
-            by = float(goal.get('y', 0.0))
-            byaw = float(goal.get('yaw', 0.0))
+            if goal.get('frame_id') != 'map':
+                self.get_logger().error('Ignoring non-map /next_cell_goal')
+                return
+            try:
+                bx = _finite_float(goal['x'])
+                by = _finite_float(goal['y'])
+                byaw = _finite_float(goal.get('yaw', 0.0))
+            except (KeyError, TypeError, ValueError):
+                self.get_logger().error('Invalid cleanup goal in /next_cell_goal')
+                return
             waste_type = data.get('waste_type', 'unknown')
             self.get_logger().info(
                 f'Cleanup goal: ({bx}, {by}) type={waste_type} '
@@ -97,7 +115,11 @@ class MissionPlannerNode(BasicNavigator):
         if self.twin_state:
             base = self.twin_state.get('base', {})
             pose = base.get('pose', {})
-            return pose.get('x', 0.0), pose.get('y', 0.0), pose.get('yaw', 0.0)
+            return (
+                _finite_float(pose.get('x', 0.0)),
+                _finite_float(pose.get('y', 0.0)),
+                _finite_float(pose.get('yaw', 0.0)),
+            )
         return 0.0, 0.0, 0.0
 
     def _navigate(self, mode, x, y, yaw):

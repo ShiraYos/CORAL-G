@@ -12,6 +12,8 @@ from my_tb3_world.debris_particles import (
     MATERIALS,
     UNKNOWN_MATERIAL,
     advance_particle,
+    debris_motion_from_parameters,
+    declare_debris_motion_parameters,
     normalize_material,
 )
 from my_tb3_world.environment_field import (
@@ -25,6 +27,7 @@ PREDICTION_MATERIALS = (UNKNOWN_MATERIAL,) + MATERIALS
 MAX_RECENT_EVENTS = 20
 COLLECTION_UPDATE_SIGMA_M = CELL_SIZE
 MATERIAL_REASSIGN_FRACTION = 0.25
+PREDICTION_DRIFT_SCALE = 0.015
 
 
 def _nearest_cell(cells, x, y):
@@ -116,7 +119,8 @@ class DebrisPredictionNode(Node):
         self.declare_parameter('simulation_horizon_sec', 60.0)
         self.declare_parameter('random_seed', 23)
         self.declare_parameter('prediction_drift_enabled', True)
-        self.declare_parameter('prediction_drift_scale', 0.1)
+        self.declare_parameter('prediction_drift_scale', PREDICTION_DRIFT_SCALE)
+        declare_debris_motion_parameters(self)
 
         self.prediction_debris_count = self.get_parameter('prediction_debris_count').value
         self.simulation_horizon_sec = self.get_parameter('simulation_horizon_sec').value
@@ -127,6 +131,7 @@ class DebrisPredictionNode(Node):
         self.prediction_drift_scale = self.get_parameter(
             'prediction_drift_scale'
         ).value
+        self.material_response, self.boid_rules = debris_motion_from_parameters(self)
 
         self.twin_map_cells = []
         self.material_evidence = {material: 0 for material in MATERIALS}
@@ -134,7 +139,6 @@ class DebrisPredictionNode(Node):
         self._next_particle_index = 1
         self._event_counts = {'observed_removed': 0, 'washed_out': 0, 'respawned': 0}
         self._recent_events = []
-        self._collection_suppressions = []
         self._belief_cells = {}
         self.prediction_particles = self._new_prediction_particles(self.prediction_debris_count)
         self._seeded_from_twin_map = False
@@ -195,7 +199,8 @@ class DebrisPredictionNode(Node):
         self._next_particle_index = 1
         self._event_counts = {'observed_removed': 0, 'washed_out': 0, 'respawned': 0}
         self._recent_events = []
-        self._collection_suppressions = []
+        self.material_evidence = {material: 0 for material in MATERIALS}
+        self._material_weights = self._material_belief_weights()
         self.prediction_particles = self._new_prediction_particles(self.prediction_debris_count)
         self._initialize_belief_from_particles()
         self._processed_collection_keys = set()
@@ -217,11 +222,11 @@ class DebrisPredictionNode(Node):
             return
 
         self.twin_map_cells = data.get('map', {}).get('cells', [])
-        if 'material_evidence' in data:
-            self._set_material_evidence(data.get('material_evidence', {}))
         if self.twin_map_cells and not self._seeded_from_twin_map:
             self._reset_prediction()
             self._seeded_from_twin_map = True
+        if 'material_evidence' in data:
+            self._set_material_evidence(data.get('material_evidence', {}))
 
         for event in data.get('collection_events', []):
             self._apply_collection_event(event)
@@ -374,13 +379,6 @@ class DebrisPredictionNode(Node):
 
         count = max(1, int(event.get('count', 1)))
         self._add_material_evidence_from_event(event)
-        self._apply_collection_to_belief(x, y, count)
-        self._collection_suppressions.append({
-            'x': x,
-            'y': y,
-            'count': count,
-        })
-        self._collection_suppressions = self._collection_suppressions[-MAX_RECENT_EVENTS:]
 
         active = [
             particle for particle in self.prediction_particles
@@ -474,6 +472,8 @@ class DebrisPredictionNode(Node):
                 self.prediction_particles,
                 field_cell,
                 self.prediction_drift_scale,
+                self.material_response,
+                self.boid_rules,
             )
             if not self._can_predict_at(next_state['x'], next_state['y']):
                 particle['status'] = 'washed_out'
@@ -544,25 +544,22 @@ class DebrisPredictionNode(Node):
             'lifetime_counts': dict(self._event_counts),
             'events': list(self._recent_events),
             'belief_model': {
-                'type': 'cell_posterior_from_collection_events',
+                'type': 'active_prediction_particle_density',
                 'normalized_for_planner_reward': True,
                 'counts_are_debug_status': True,
             },
             'material_belief': self._material_belief_summary(),
+            'material_response': self.material_response,
+            'boid_rules': self.boid_rules,
             'prediction_particles': self._debug_particles(),
         })
         self.prediction_dashboard_pub.publish(out)
 
     def _publish(self):
+        self.material_response, self.boid_rules = debris_motion_from_parameters(self)
         self._advance_predictions()
         self._respawn_to_target()
         self._initialize_belief_from_particles()
-        for suppression in self._collection_suppressions:
-            self._apply_collection_to_belief(
-                suppression['x'],
-                suppression['y'],
-                suppression['count'],
-            )
         cells = self._density_cells()
         density_cells = sorted(cells.values(), key=lambda c: (c['x'], c['y']))
         counts = self._counts()
