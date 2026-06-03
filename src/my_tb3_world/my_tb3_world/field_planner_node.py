@@ -11,16 +11,17 @@ Decision priority:
   3. no predicted debris mass left  → idle (mission complete)
   4. otherwise         → cleanup goal at highest-utility uncollected cell
 
-Goals are only published when the decision changes, avoiding cancel/resend
-churn in mission_planner_node.
+Goals are republished every republish_interval_sec even if unchanged,
+so late-joining subscribers (e.g. mission_planner_node after Nav2 activation)
+always receive the current decision within that window.
 """
 
 import json
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 
@@ -41,6 +42,9 @@ class FieldPlannerNode(Node):
         self.declare_parameter('map_risk_weight', 0.5)
         self.declare_parameter('return_reserve', 0.2)
         self.declare_parameter('min_density_reward', 0.1)
+        self.declare_parameter('min_goal_distance_m', 0.5)
+        self.declare_parameter('republish_interval_sec', 10.0)
+        self.declare_parameter('lock_timeout_sec', 130.0)
 
         self._fuel_thresh = float(self.get_parameter('fuel_return_threshold').value)
         self._storage_thresh = float(self.get_parameter('storage_return_threshold').value)
@@ -51,6 +55,9 @@ class FieldPlannerNode(Node):
         self._map_risk_weight = float(self.get_parameter('map_risk_weight').value)
         self._return_reserve = float(self.get_parameter('return_reserve').value)
         self._min_density_reward = float(self.get_parameter('min_density_reward').value)
+        self._min_goal_distance = float(self.get_parameter('min_goal_distance_m').value)
+        self._republish_interval = float(self.get_parameter('republish_interval_sec').value)
+        self._lock_timeout_sec = float(self.get_parameter('lock_timeout_sec').value)
 
         self.twin_state = None
         self.density_map = None
@@ -58,16 +65,20 @@ class FieldPlannerNode(Node):
         # Track last published decision to avoid duplicate goals
         self._last_mode: str | None = None
         self._last_target: tuple | None = None  # (x, y) for cleanup
+        self._last_publish_time: float = 0.0
+
+        # Lock onto a target until collection confirms it was picked up.
+        # Uses position-based unlock since density cells carry no cluster_id.
+        self._locked_target = None  # (cluster_id, x, y)
+        self._lock_acquired_at = None   # time.monotonic() when lock was set
+        self._collected_ids: set = set()
 
         self.create_subscription(String, '/twin_state', self._twin_state_cb, 10)
         self.create_subscription(String, '/debris_density_map', self._density_map_cb, 10)
+        self.create_subscription(String, '/collection_event', self._collection_cb, 10)
 
-        goal_qos = QoSProfile(
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-        )
-        self.goal_pub = self.create_publisher(String, '/next_cell_goal', goal_qos)
+        # VOLATILE QoS — matches mission_planner_node subscription and ros2 topic pub
+        self.goal_pub = self.create_publisher(String, '/next_cell_goal', 10)
 
         rate = float(self.get_parameter('plan_rate_hz').value)
         self.create_timer(1.0 / rate, self._plan)
@@ -87,6 +98,33 @@ class FieldPlannerNode(Node):
             self.density_map = json.loads(msg.data)
         except json.JSONDecodeError:
             self.get_logger().error('Bad JSON on /debris_density_map')
+
+    def _collection_cb(self, msg: String):
+        try:
+            event = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        cid = event.get('cluster_id')
+        if cid:
+            self._collected_ids.add(cid)
+            if self._locked_target and self._locked_target[0] == cid:
+                self.get_logger().info(f'Target {cid} collected — unlocking')
+                self._locked_target = None
+                self._lock_acquired_at = None
+                self._last_mode = None
+                self._last_target = None
+        elif self._locked_target is not None and self._locked_target[0] is None:
+            # Density cells carry no cluster_id — unlock by proximity to locked position
+            loc = event.get('location', {})
+            lx = loc.get('x', float('inf'))
+            ly = loc.get('y', float('inf'))
+            _, tx, ty = self._locked_target
+            if math.sqrt((lx - tx) ** 2 + (ly - ty) ** 2) < 1.0:
+                self.get_logger().info('Collection near locked target — unlocking')
+                self._locked_target = None
+                self._lock_acquired_at = None
+                self._last_mode = None
+                self._last_target = None
 
     # ── Planning ───────────────────────────────────────────────────────────────
 
@@ -138,6 +176,11 @@ class FieldPlannerNode(Node):
         if density_reward < self._min_density_reward:
             return None
 
+        # Skip cells the robot is already standing on
+        actual_dist = math.sqrt((robot_x - cell['x']) ** 2 + (robot_y - cell['y']) ** 2)
+        if actual_dist < self._min_goal_distance:
+            return None
+
         travel_distance = self._normalized_distance(robot_x, robot_y, cell['x'], cell['y'])
         return_distance = self._normalized_distance(cell['x'], cell['y'], base_x, base_y)
         fuel_margin = fuel - return_distance - self._return_reserve
@@ -167,7 +210,39 @@ class FieldPlannerNode(Node):
 
     def _plan(self):
         if self.twin_state is None or self.density_map is None:
+            self.get_logger().info(
+                f'Waiting for data: twin_state={self.twin_state is not None} '
+                f'density_map={self.density_map is not None}',
+                throttle_duration_sec=5.0,
+            )
             return
+
+        # Don't plan until all digital twin inputs are live — prevents sending
+        # goals before AMCL has converged at startup.
+        sync_status = self.twin_state.get('sync_status', 'unknown')
+        if sync_status != 'ready':
+            self.get_logger().info(
+                f'Waiting for system ready: {sync_status}',
+                throttle_duration_sec=5.0,
+            )
+            return
+
+        # Hold current target until _collection_cb clears it via proximity match,
+        # or until lock_timeout_sec elapses (handles Nav2 failure/cancel with no
+        # collection event — without this the planner freezes permanently).
+        if self._locked_target is not None:
+            if (self._lock_acquired_at is not None and
+                    time.monotonic() - self._lock_acquired_at > self._lock_timeout_sec):
+                self.get_logger().warn(
+                    f'Goal lock timed out after {self._lock_timeout_sec:.0f}s — '
+                    f'force-unlocking ({self._locked_target[1]:.2f}, {self._locked_target[2]:.2f})'
+                )
+                self._locked_target = None
+                self._lock_acquired_at = None
+                self._last_mode = None
+                self._last_target = None
+            else:
+                return
 
         robot = self.twin_state.get('robot', {})
         fuel = robot.get('fuel_level', 1.0)
@@ -178,6 +253,13 @@ class FieldPlannerNode(Node):
         map_confidence = self._map_confidence()
 
         remaining_debris_mass = self._remaining_debris_mass()
+        self.get_logger().info(
+            f'Plan tick: fuel={fuel:.2f} storage={storage_fill:.2f} '
+            f'debris_mass={remaining_debris_mass} '
+            f'density_cells={len(self._density_cells())} '
+            f'map_cells={len(self.twin_state.get("map", {}).get("cells", []))}',
+            throttle_duration_sec=5.0,
+        )
 
         # ── Decide mode ──────────────────────────────────────────────────────
 
@@ -196,8 +278,7 @@ class FieldPlannerNode(Node):
                     'fuel_penalty': round(self._fuel_weight * max(0.0, 1.0 - fuel), 3),
                     'map_risk': round(self._map_risk_weight * (1.0 - map_confidence), 3),
                     'return_cost': round(
-                        self._normalized_distance(robot_x, robot_y, base_x, base_y),
-                        3,
+                        self._normalized_distance(robot_x, robot_y, base_x, base_y), 3,
                     ),
                     'fuel_margin': round(fuel - self._return_reserve, 3),
                 },
@@ -219,14 +300,8 @@ class FieldPlannerNode(Node):
                 if not self._is_allowed_density_cell(cell, map_lookup):
                     continue
                 score = self._score_cell(
-                    cell,
-                    robot_x,
-                    robot_y,
-                    base_x,
-                    base_y,
-                    fuel,
-                    storage_fill,
-                    map_confidence,
+                    cell, robot_x, robot_y, base_x, base_y,
+                    fuel, storage_fill, map_confidence,
                 )
                 if score is None:
                     continue
@@ -242,14 +317,21 @@ class FieldPlannerNode(Node):
             else:
                 mode = 'cleanup'
                 target = (best_cell['x'], best_cell['y'])
+                self._locked_target = (best_cell.get('cluster_id'), target[0], target[1])
+                self._lock_acquired_at = time.monotonic()
 
-        # ── Only publish when the decision changes ───────────────────────────
+        # ── Publish when decision changes OR republish interval has elapsed ──
 
-        if mode == self._last_mode and target == self._last_target:
+        now = self.get_clock().now().nanoseconds / 1e9
+        decision_unchanged = (mode == self._last_mode and target == self._last_target)
+        time_to_republish = (now - self._last_publish_time) >= self._republish_interval
+
+        if decision_unchanged and not time_to_republish:
             return
 
         self._last_mode = mode
         self._last_target = target
+        self._last_publish_time = now
 
         if mode == 'idle':
             self.get_logger().info('Mission complete — no predicted debris mass, going idle')
@@ -301,8 +383,11 @@ class FieldPlannerNode(Node):
         return f'{t.sec}.{t.nanosec:09d}'
 
     def _publish(self, payload: dict):
-        payload.update({'schema': 'dtas.next_cell_goal.v1', 'stamp': self._stamp(),
-                        'source': 'field_planner_node'})
+        payload.update({
+            'schema': 'dtas.next_cell_goal.v1',
+            'stamp': self._stamp(),
+            'source': 'field_planner_node',
+        })
         msg = String()
         msg.data = json.dumps(payload)
         self.goal_pub.publish(msg)

@@ -79,25 +79,12 @@ def generate_launch_description():
         }.items(),
     )
 
-    rviz = Node(
-        package='rviz2',
-        executable='rviz2',
-        name='rviz2',
-        output='screen',
-        condition=IfCondition(use_rviz),
-        parameters=[{'use_sim_time': use_sim_time}],
-    )
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim_time',
             default_value='true',
             description='Use simulation clock.',
-        ),
-        DeclareLaunchArgument(
-            'use_rviz',
-            default_value='true',
-            description='Start RViz alongside Gazebo/Nav2.',
         ),
         DeclareLaunchArgument(
             'autostart',
@@ -135,7 +122,6 @@ def generate_launch_description():
         ),
         world_launch,
         TimerAction(period=5.0, actions=[nav2_launch]),
-        TimerAction(period=12.0, actions=[coral_g_launch]),
-        TimerAction(period=15.0, actions=[rviz]),
+        TimerAction(period=45.0, actions=[coral_g_launch]),
     ])
 

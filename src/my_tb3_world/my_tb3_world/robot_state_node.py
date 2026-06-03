@@ -119,6 +119,8 @@ class RobotStateNode(Node):
         self.get_logger().info('Robot debug state reset')
 
     def _drain_fuel(self):
+        if self._is_at_base():
+            return  # no drain while docked
         if self.fuel_pct > 0.0:
             self.fuel_pct = max(0.0, self.fuel_pct - self.fuel_drain_rate)
         if self.fuel_pct <= self.fuel_low_threshold and not self.fuel_low:
@@ -137,9 +139,11 @@ class RobotStateNode(Node):
     def _publish(self):
         at_base = self._is_at_base()
 
-        # Reset storage and fuel when robot arrives at base
-        if at_base and not self._was_at_base:
-            self.get_logger().info('Returned to base — resetting storage and fuel')
+        # While docked at base: continuously deposit items and refuel.
+        # This also handles startup collections that fill storage before the robot moves.
+        if at_base:
+            if self.storage_count > 0 or self.fuel_pct < 100.0:
+                self.get_logger().info('At base — depositing storage, refueling')
             self.storage_count = 0
             self.fuel_pct = 100.0
             self.fuel_low = False

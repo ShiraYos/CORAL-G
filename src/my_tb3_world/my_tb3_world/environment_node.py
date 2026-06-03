@@ -44,12 +44,14 @@ class EnvironmentNode(Node):
         self.declare_parameter('debris_drift_enabled', True)
         self.declare_parameter('debris_drift_scale', DEBRIS_DRIFT_SCALE)
         self.declare_parameter('physical_debris_seed', 23)
+        self.declare_parameter('proximity_collection_enabled', False)
         declare_debris_motion_parameters(self)
 
         self.cell_size = self.get_parameter('cell_size_m').value
         self.collection_radius = COLLECTION_RADIUS_M
         self.debris_drift_enabled = self.get_parameter('debris_drift_enabled').value
         self.debris_drift_scale = self.get_parameter('debris_drift_scale').value
+        self.proximity_collection_enabled = self.get_parameter('proximity_collection_enabled').value
         self.physical_debris_count = PHYSICAL_DEBRIS_COUNT
         self.physical_debris_seed = self.get_parameter('physical_debris_seed').value
         self.material_response, self.boid_rules = debris_motion_from_parameters(self)
@@ -417,7 +419,7 @@ class EnvironmentNode(Node):
         self._request_environment_field()
         self._advance_debris_truth()
 
-        if self.pose_received:
+        if self.pose_received and self.proximity_collection_enabled:
             self._check_collections()
         self._respawn_to_target()
 

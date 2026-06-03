@@ -187,7 +187,6 @@ def generate_launch_description():
             parameters=[demo_params_file, {
                 'use_sim_time': use_sim_time,
                 'publish_rate_hz': 1.0,
-                'prediction_debris_count': 100,
                 'simulation_horizon_sec': 60.0,
                 'random_seed': 23,
                 'prediction_drift_enabled': True,

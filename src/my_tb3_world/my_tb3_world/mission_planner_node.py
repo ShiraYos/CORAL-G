@@ -44,11 +44,12 @@ class MissionPlannerNode(BasicNavigator):
         localizer = self.get_parameter('localizer').value
         self.active_goal_started_at = None
         self.goal_handle = None
-        self._pending_goal = None  # (mode, x, y, yaw) — queued while cancel is in flight
+        self._pending_goal = None
         self._active_goal_intent = None
 
         self.twin_state = None
 
+        # VOLATILE QoS — matches field_planner_node publisher and ros2 topic pub
         self.create_subscription(String, '/next_cell_goal', self._goal_cb, 10)
         self.create_subscription(String, '/twin_state', self._twin_state_cb, 10)
         self.collection_pub = self.create_publisher(String, '/collection_event', 10)
@@ -58,18 +59,13 @@ class MissionPlannerNode(BasicNavigator):
             float(self.get_parameter('initial_y').value),
             float(self.get_parameter('initial_yaw').value),
         )
-        # Send once immediately (may be dropped if AMCL isn't up yet)
         self.setInitialPose(self._initial_pose)
         self.get_logger().info(f'Waiting for Nav2 (localizer={localizer})...')
         self.waitUntilNav2Active(localizer=localizer)
-        # Re-send after Nav2 is confirmed active so AMCL definitely receives it
         self.setInitialPose(self._initial_pose)
         self.get_logger().info('Nav2 active — initial pose set, ready for goals')
 
-        # Timer only checks timeout — no BasicNavigator spinning methods called
         self.create_timer(0.5, self._check_timeout)
-
-    # ── Callbacks ──────────────────────────────────────────────────────────────
 
     def _twin_state_cb(self, msg: String):
         try:
@@ -120,8 +116,6 @@ class MissionPlannerNode(BasicNavigator):
 
         self._navigate(mode, bx, by, byaw)
 
-    # ── Navigation (fully async — no spin_until_future_complete) ───────────────
-
     def _base_from_twin(self):
         if self.twin_state:
             base = self.twin_state.get('base', {})
@@ -134,19 +128,15 @@ class MissionPlannerNode(BasicNavigator):
         return 0.0, 0.0, 0.0
 
     def _navigate(self, mode, x, y, yaw):
-        """Send a goal only when Nav2 is not already executing one."""
         if self.goal_handle is not None or self.active_goal_started_at is not None:
             self.get_logger().info(
                 f'Ignoring {mode} goal while Nav2 goal is active'
             )
             return
-
         self._pending_goal = (mode, x, y, yaw)
-
         self._send_pending_goal()
 
     def _on_cancel_done(self):
-        """Called after Nav2 confirms the cancel — now safe to send the new goal."""
         self.get_logger().info('Previous goal canceled — sending pending goal')
         self._send_pending_goal()
 
@@ -161,7 +151,7 @@ class MissionPlannerNode(BasicNavigator):
 
         send_future = self.nav_to_pose_client.send_goal_async(
             goal_msg,
-            feedback_callback=None,  # no feedback needed
+            feedback_callback=None,
         )
         send_future.add_done_callback(lambda f: self._on_goal_accepted(f, mode, x, y))
         self.get_logger().info(f'Sending goal: mode={mode} target=({x:.2f}, {y:.2f})')
@@ -175,7 +165,7 @@ class MissionPlannerNode(BasicNavigator):
             return
         self.goal_handle = goal_handle
         self._active_goal_intent = {'mode': mode, 'x': x, 'y': y}
-        self.active_goal_started_at = time.monotonic()  # start timeout only after acceptance
+        self.active_goal_started_at = time.monotonic()
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(self._on_nav_result)
         self.get_logger().info(f'Goal accepted — navigating to ({x:.2f}, {y:.2f})')
@@ -225,7 +215,9 @@ class MissionPlannerNode(BasicNavigator):
         if time.monotonic() - self.active_goal_started_at > self.goal_timeout_sec:
             self.get_logger().warn('Goal timed out — canceling')
             cancel_future = self.goal_handle.cancel_goal_async()
-            cancel_future.add_done_callback(lambda f: self.get_logger().info('Timeout cancel confirmed'))
+            cancel_future.add_done_callback(
+                lambda f: self.get_logger().info('Timeout cancel confirmed')
+            )
             self.goal_handle = None
             self.active_goal_started_at = None
             self._active_goal_intent = None
