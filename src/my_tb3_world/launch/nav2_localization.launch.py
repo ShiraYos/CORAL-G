@@ -4,7 +4,7 @@ Nav2 navigation with a pre-built map (AMCL localisation, no SLAM).
 Use this for all runs after the map has been saved once with nav2_slam_navigation.launch.py.
 
 Save the map first (while SLAM is running):
-  ros2 run nav2_map_server map_saver_cli -f /ws/src/my_tb3_world/maps/arena_map
+  ros2 run nav2_map_server map_saver_cli -f /ws/src/my_tb3_world/maps/arena_map_lab
 
 Launch order:
   1. new_world.launch.py           — Gazebo
@@ -26,7 +26,7 @@ def generate_launch_description():
     nav2_bringup_share = get_package_share_directory('nav2_bringup')
     my_pkg_share       = get_package_share_directory('my_tb3_world')
 
-    default_map_file    = os.path.join(my_pkg_share, 'maps',   'arena_map.yaml')
+    default_map_file    = os.path.join(my_pkg_share, 'maps',   'arena_map_lab.yaml')
     default_params_file = os.path.join(my_pkg_share, 'params', 'nav2_params.yaml')
 
     use_sim_time     = LaunchConfiguration('use_sim_time',     default='true')
@@ -83,7 +83,7 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time',  default_value='true'),
         DeclareLaunchArgument('autostart',     default_value='true'),
         DeclareLaunchArgument('map',           default_value=default_map_file,
-                              description='Full path to arena_map.yaml'),
+                              description='Full path to arena_map_lab.yaml'),
         DeclareLaunchArgument('params_file',   default_value=default_params_file),
         DeclareLaunchArgument('goal_timeout_sec', default_value='120.0'),
         DeclareLaunchArgument('initial_x',     default_value='0.0'),

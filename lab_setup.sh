@@ -5,6 +5,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 CORAL_G_WS="$HOME/CORAL-G"
+TURTLEBOT3_WS="$HOME/turtlebot3_ws"
 
 # ── Colours ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -58,13 +59,12 @@ echo -e "  ${OK}✓${NC} /opt/ros/jazzy/setup.bash"
 
 # ── [3] Source TurtleBot3 workspace ──────────────────────────────────────────
 echo -e "${BLU}[2/4]${NC} Sourcing TurtleBot3 workspace..."
-if [ ! -f "$HOME/turtlebot3_ws/install/setup.bash" ]; then
-    echo -e "  ${ERR}✗ ~/turtlebot3_ws/install/setup.bash not found.${NC}"
-    echo -e "  ${ERR}  TurtleBot3 dependencies must be built separately.${NC}"
-    exit 1
+if [ -f "$TURTLEBOT3_WS/install/setup.bash" ]; then
+    source "$TURTLEBOT3_WS/install/setup.bash"
+    echo -e "  ${OK}✓${NC} ~/turtlebot3_ws/install/setup.bash"
+else
+    echo -e "  ${WRN}✗${NC} ~/turtlebot3_ws/install/setup.bash not found — continuing with ROS 2 only"
 fi
-source "$HOME/turtlebot3_ws/install/setup.bash"
-echo -e "  ${OK}✓${NC} ~/turtlebot3_ws/install/setup.bash"
 
 # ── [4] Set environment ───────────────────────────────────────────────────────
 export TURTLEBOT3_MODEL=burger
@@ -85,7 +85,7 @@ NEED_BUILD=false
 if [ ! -f "$CORAL_G_WS/install/setup.bash" ]; then
     echo -e "  ${WRN}install/setup.bash not found — will build.${NC}"
     NEED_BUILD=true
-elif ! grep -q "$CORAL_G_WS" "$CORAL_G_WS/install/setup.bash" 2>/dev/null; then
+elif ! grep -q "$CORAL_G_WS/install" "$CORAL_G_WS/install/local_setup.sh" 2>/dev/null; then
     echo -e "  ${WRN}Build artifacts are from a different machine. Cleaning and rebuilding...${NC}"
     rm -rf "$CORAL_G_WS/build" "$CORAL_G_WS/install" "$CORAL_G_WS/log"
     NEED_BUILD=true
@@ -95,8 +95,8 @@ fi
 
 if [ "$NEED_BUILD" = true ]; then
     cd "$CORAL_G_WS"
-    echo -e "  Building my_tb3_world..."
-    if ! colcon build --packages-select my_tb3_world 2>&1; then
+    echo -e "  Building my_tb3_world and dependencies..."
+    if ! colcon build --packages-up-to my_tb3_world 2>&1; then
         echo ""
         echo -e "  ${ERR}✗ Build failed. Fix the errors above before proceeding.${NC}"
         exit 1
@@ -237,7 +237,7 @@ echo -e "     ${CMD}${SRC} && ros2 topic pub --once /cmd_vel geometry_msgs/msg/T
 echo ""
 
 echo -e "${OPT}  T)${NC} Rebuild package  (deletes build / install / log and rebuilds)"
-echo -e "     ${CMD}cd ~/CORAL-G && rm -rf build install log && source /opt/ros/jazzy/setup.bash && source ~/turtlebot3_ws/install/setup.bash && colcon build --packages-select my_tb3_world && source install/setup.bash${NC}"
+echo -e "     ${CMD}cd ~/CORAL-G && rm -rf build install log && source /opt/ros/jazzy/setup.bash && { [ ! -f ~/turtlebot3_ws/install/setup.bash ] || source ~/turtlebot3_ws/install/setup.bash; } && colcon build --packages-up-to my_tb3_world && source install/setup.bash${NC}"
 echo ""
 
 divider
@@ -250,7 +250,7 @@ echo ""
 exec bash --rcfile <(cat <<RCEOF
 [ -f ~/.bashrc ] && source ~/.bashrc
 source /opt/ros/jazzy/setup.bash
-source $HOME/turtlebot3_ws/install/setup.bash
+[ -f $TURTLEBOT3_WS/install/setup.bash ] && source $TURTLEBOT3_WS/install/setup.bash
 source $CORAL_G_WS/install/setup.bash
 export TURTLEBOT3_MODEL=burger
 export LDS_MODEL=LDS-02
