@@ -1057,12 +1057,7 @@ def main():
     node.create_subscription(String, '/dashboard', dashboard_cb, 10)
     node.create_subscription(String, '/debris_density_map', density_cb, 10)
     node.create_subscription(String, '/prediction_dashboard', prediction_dashboard_cb, 10)
-    planner_qos = QoSProfile(
-        depth=1,
-        reliability=ReliabilityPolicy.RELIABLE,
-        durability=DurabilityPolicy.TRANSIENT_LOCAL,
-    )
-    node.create_subscription(String, '/next_cell_goal', planner_intent_cb, planner_qos)
+    node.create_subscription(String, '/next_cell_goal', planner_intent_cb, 10)
 
     current_started = 0.0
     last_publish = 0.0

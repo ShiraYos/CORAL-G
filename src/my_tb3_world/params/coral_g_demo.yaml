@@ -22,7 +22,10 @@ debris_prediction_node:
     prediction_debris_count: 25
     simulation_horizon_sec: 60.0
     random_seed: 23
-    prediction_drift_enabled: true
+    # Drift disabled: particles must stay near known cluster positions so the
+    # density map reliably points to actual debris. Enabling drift scatters
+    # particles across the arena within minutes, sending the robot to empty cells.
+    prediction_drift_enabled: false
     prediction_drift_scale: 0.015
 
 field_planner_node:

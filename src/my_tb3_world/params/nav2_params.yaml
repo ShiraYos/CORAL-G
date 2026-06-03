@@ -1,6 +1,5 @@
 amcl:
   ros__parameters:
-    use_sim_time: True
     alpha1: 0.2
     alpha2: 0.2
     alpha3: 0.2
@@ -50,7 +49,6 @@ amcl:
 
 bt_navigator:
   ros__parameters:
-    use_sim_time: True
     global_frame: map
     robot_base_frame: base_link
     transform_tolerance: 0.5
@@ -84,7 +82,6 @@ bt_navigator:
 
 controller_server:
   ros__parameters:
-    use_sim_time: True
     controller_frequency: 10.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.001
@@ -146,7 +143,6 @@ controller_server:
 local_costmap:
   local_costmap:
     ros__parameters:
-      use_sim_time: True
       update_frequency: 5.0
       publish_frequency: 2.0
       global_frame: odom
@@ -159,8 +155,8 @@ local_costmap:
       plugins: ["obstacle_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.15
-        cost_scaling_factor: 5.0
+        inflation_radius: 0.10
+        cost_scaling_factor: 10.0
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -198,7 +194,6 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      use_sim_time: True
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map
@@ -248,18 +243,16 @@ global_costmap:
         transform_tolerance: 0.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.15
-        cost_scaling_factor: 5.0
+        inflation_radius: 0.10
+        cost_scaling_factor: 10.0
       always_send_full_costmap: true
 
 map_server:
   ros__parameters:
-    use_sim_time: True
-    yaml_filename: "/home/team23/CORAL-G/src/my_tb3_world/maps/arena_map_lab.yaml"
+    yaml_filename: "/ws/src/my_tb3_world/maps/arena_map.yaml"
 
 map_saver:
   ros__parameters:
-    use_sim_time: True
     save_map_timeout: 5.0
     free_thresh_default: 0.25
     occupied_thresh_default: 0.65
@@ -267,7 +260,6 @@ map_saver:
 
 planner_server:
   ros__parameters:
-    use_sim_time: True
     expected_planner_frequency: 1.0
     planner_plugins: ["GridBased"]
     GridBased:
@@ -278,7 +270,6 @@ planner_server:
 
 behavior_server:
   ros__parameters:
-    use_sim_time: True
     local_costmap_topic: local_costmap/costmap_raw
     local_footprint_topic: local_costmap/published_footprint
     global_costmap_topic: global_costmap/costmap_raw
@@ -307,7 +298,6 @@ behavior_server:
 
 waypoint_follower:
   ros__parameters:
-    use_sim_time: True
     loop_rate: 20
     stop_on_failure: false
     waypoint_task_executor_plugin: "wait_at_waypoint"
@@ -318,7 +308,6 @@ waypoint_follower:
 
 collision_monitor:
   ros__parameters:
-    use_sim_time: True
     base_frame_id: "base_footprint"
     odom_frame_id: "odom"
     cmd_vel_in_topic: "cmd_vel_smoothed"
@@ -366,7 +355,6 @@ collision_monitor:
 
 velocity_smoother:
   ros__parameters:
-    use_sim_time: True
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
@@ -383,7 +371,6 @@ velocity_smoother:
 
 docking_server:
   ros__parameters:
-    use_sim_time: True
     controller_frequency: 50.0
     initial_perception_timeout: 5.0
     wait_charge_timeout: 5.0
@@ -411,7 +398,6 @@ docking_server:
 
 slam_toolbox:
   ros__parameters:
-    use_sim_time: True
     solver_plugin: solver_plugins::CeresSolver
     ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
     ceres_preconditioner: SCHUR_JACOBI

@@ -6,6 +6,7 @@ import math
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
@@ -27,6 +28,9 @@ class RobotStateNode(Node):
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
 
         self.create_subscription(Odometry, '/odom', self._odom_cb, qos)
+        self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose', self._amcl_pose_cb, qos
+        )
         self.create_subscription(String, '/collection_event', self._collection_event_cb, 10)
         self.create_subscription(String, '/base_pose', self._base_pose_cb, 10)
         self.create_subscription(String, '/debug_reset', self._debug_reset_cb, 10)
@@ -36,7 +40,7 @@ class RobotStateNode(Node):
         self.create_timer(0.5, self._publish)
         self.create_timer(1.0, self._drain_fuel)
 
-        # Pose (from odom)
+        # Pose (from odom — heading, velocity, distance accumulation)
         self.x = 0.0
         self.y = 0.0
         self.heading = 0.0
@@ -44,6 +48,11 @@ class RobotStateNode(Node):
         self.odom_distance_m = 0.0
         self._prev_x = None
         self._prev_y = None
+
+        # Map-frame position (from /amcl_pose — used for at-base detection and published pose)
+        self._map_x = 0.0
+        self._map_y = 0.0
+        self._has_amcl = False
 
         # Base pose (from /base_pose — default to origin)
         self.base_x = 0.0
@@ -79,6 +88,11 @@ class RobotStateNode(Node):
             )
         self._prev_x = self.x
         self._prev_y = self.y
+
+    def _amcl_pose_cb(self, msg: PoseWithCovarianceStamped):
+        self._map_x = msg.pose.pose.position.x
+        self._map_y = msg.pose.pose.position.y
+        self._has_amcl = True
 
     def _collection_event_cb(self, msg: String):
         try:
@@ -128,9 +142,10 @@ class RobotStateNode(Node):
             self.get_logger().warn(f'Fuel low: {self.fuel_pct:.1f}%')
 
     def _is_at_base(self) -> bool:
-        return math.sqrt(
-            (self.x - self.base_x) ** 2 + (self.y - self.base_y) ** 2
-        ) < self.base_radius_m
+        # Use map-frame position (AMCL) when available; fall back to odom for SLAM mode.
+        x = self._map_x if self._has_amcl else self.x
+        y = self._map_y if self._has_amcl else self.y
+        return math.sqrt((x - self.base_x) ** 2 + (y - self.base_y) ** 2) < self.base_radius_m
 
     def _stamp(self) -> str:
         t = self.get_clock().now().to_msg()
@@ -157,8 +172,8 @@ class RobotStateNode(Node):
             'stamp': self._stamp(),
             'source': 'robot_state_node',
             'pose': {
-                'x': round(self.x, 3),
-                'y': round(self.y, 3),
+                'x': round(self._map_x if self._has_amcl else self.x, 3),
+                'y': round(self._map_y if self._has_amcl else self.y, 3),
                 'yaw': round(self.heading, 3),
             },
             'velocity': round(self.velocity, 3),

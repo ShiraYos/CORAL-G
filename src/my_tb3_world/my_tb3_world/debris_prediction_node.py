@@ -29,6 +29,14 @@ COLLECTION_UPDATE_SIGMA_M = CELL_SIZE
 MATERIAL_REASSIGN_FRACTION = 0.25
 PREDICTION_DRIFT_SCALE = 0.015
 
+# Known cluster positions — particles seeded here for predictable navigation
+# Must match cluster positions in environment_node.py and new_world.world
+CLUSTER_SEED_POSITIONS = [
+    {'x': 0.88,  'y': 1.04,  'material': 'plastic'},  # cluster_1
+    {'x': -1.2,  'y': -1.2,  'material': 'wood'},      # cluster_2
+    {'x': -1.2,  'y': 1.2,   'material': 'metal'},     # cluster_3
+]
+
 
 def _nearest_cell(cells, x, y):
     if not cells:
@@ -120,17 +128,15 @@ class DebrisPredictionNode(Node):
         self.declare_parameter('random_seed', 23)
         self.declare_parameter('prediction_drift_enabled', True)
         self.declare_parameter('prediction_drift_scale', PREDICTION_DRIFT_SCALE)
+        self.declare_parameter('seed_near_clusters', True)
         declare_debris_motion_parameters(self)
 
         self.prediction_debris_count = self.get_parameter('prediction_debris_count').value
         self.simulation_horizon_sec = self.get_parameter('simulation_horizon_sec').value
         self.random_seed = self.get_parameter('random_seed').value
-        self.prediction_drift_enabled = self.get_parameter(
-            'prediction_drift_enabled'
-        ).value
-        self.prediction_drift_scale = self.get_parameter(
-            'prediction_drift_scale'
-        ).value
+        self.prediction_drift_enabled = self.get_parameter('prediction_drift_enabled').value
+        self.prediction_drift_scale = self.get_parameter('prediction_drift_scale').value
+        self.seed_near_clusters = self.get_parameter('seed_near_clusters').value
         self.material_response, self.boid_rules = debris_motion_from_parameters(self)
 
         self.twin_map_cells = []
@@ -140,6 +146,8 @@ class DebrisPredictionNode(Node):
         self._event_counts = {'observed_removed': 0, 'washed_out': 0, 'respawned': 0}
         self._recent_events = []
         self._belief_cells = {}
+        self._exhausted_clusters: set = set()        # cluster indices with confirmed collection
+        self._recent_collection_locations: dict = {} # (rx, ry) -> sim_time_sec, for loc dedup
         self.prediction_particles = self._new_prediction_particles(self.prediction_debris_count)
         self._seeded_from_twin_map = False
         self._processed_collection_keys = set()
@@ -150,17 +158,14 @@ class DebrisPredictionNode(Node):
         self.create_subscription(String, '/debug_reset', self._debug_reset_cb, 10)
 
         self.density_pub = self.create_publisher(String, '/debris_density_map', 10)
-        self.prediction_dashboard_pub = self.create_publisher(
-            String,
-            '/prediction_dashboard',
-            10,
-        )
+        self.prediction_dashboard_pub = self.create_publisher(String, '/prediction_dashboard', 10)
 
         rate = float(self.get_parameter('publish_rate_hz').value)
         self.create_timer(1.0 / rate, self._publish)
 
         self.get_logger().info(
-            f'DebrisPredictionNode: tracking {len(self.prediction_particles)} prediction particles'
+            f'DebrisPredictionNode: tracking {len(self.prediction_particles)} prediction particles '
+            f'(seed_near_clusters={self.seed_near_clusters})'
         )
 
     # ── Callbacks ──────────────────────────────────────────────────────────────
@@ -168,7 +173,66 @@ class DebrisPredictionNode(Node):
     def _source_cells(self):
         return self.twin_map_cells or _fallback_density_cells()
 
+    def _seed_near_clusters(self, count):
+        """Seed particles near active (non-exhausted) cluster positions.
+
+        Falls back to uniform random seeding when all clusters are exhausted.
+        RNG seed includes _next_particle_index so jitter varies across respawn calls.
+        """
+        active_clusters = [
+            (i, cluster) for i, cluster in enumerate(CLUSTER_SEED_POSITIONS)
+            if i not in self._exhausted_clusters
+        ]
+        if not active_clusters:
+            self.get_logger().info('All clusters exhausted — falling back to random seeding')
+            particles = seed_prediction_particles(
+                self._source_cells(),
+                count,
+                self.random_seed,
+                self._next_particle_index,
+                self._material_weights,
+            )
+            self._next_particle_index += int(count)
+            return particles
+
+        cluster_positions = ', '.join(
+            f'cluster_{i}({c["x"]}, {c["y"]})' for i, c in active_clusters
+        )
+        self.get_logger().info(
+            f'Seeding {count} prediction particles near: {cluster_positions}'
+        )
+
+        rng = random.Random(f'{self.random_seed}:clusters:{self._next_particle_index}:{count}')
+        particles = []
+        n_clusters = len(active_clusters)
+        per_cluster = count // n_clusters
+        remainder = count % n_clusters
+        index = self._next_particle_index
+        for slot, (_, cluster) in enumerate(active_clusters):
+            n = per_cluster + (1 if slot < remainder else 0)
+            for _ in range(n):
+                jitter_x = rng.uniform(-0.2, 0.2)
+                jitter_y = rng.uniform(-0.2, 0.2)
+                particles.append({
+                    'id': f'prediction_particle_{index:03d}',
+                    'material': cluster['material'],
+                    'x': round(cluster['x'] + jitter_x, 3),
+                    'y': round(cluster['y'] + jitter_y, 3),
+                    'initial_x': cluster['x'],
+                    'initial_y': cluster['y'],
+                    'vx': 0.0,
+                    'vy': 0.0,
+                    'ax': 0.0,
+                    'ay': 0.0,
+                    'status': 'active',
+                })
+                index += 1
+        self._next_particle_index = index
+        return particles
+
     def _new_prediction_particles(self, count):
+        if self.seed_near_clusters:
+            return self._seed_near_clusters(count)
         particles = seed_prediction_particles(
             self._source_cells(),
             count,
@@ -201,6 +265,8 @@ class DebrisPredictionNode(Node):
         self._recent_events = []
         self.material_evidence = {material: 0 for material in MATERIALS}
         self._material_weights = self._material_belief_weights()
+        self._exhausted_clusters = set()
+        self._recent_collection_locations = {}
         self.prediction_particles = self._new_prediction_particles(self.prediction_debris_count)
         self._initialize_belief_from_particles()
         self._processed_collection_keys = set()
@@ -254,7 +320,6 @@ class DebrisPredictionNode(Node):
                 next_evidence[normalized] += max(0, int(count))
         if next_evidence == self.material_evidence:
             return
-
         self.material_evidence = next_evidence
         self._material_weights = self._material_belief_weights()
         self._apply_material_belief_to_existing_particles()
@@ -376,6 +441,27 @@ class DebrisPredictionNode(Node):
         y = location.get('y')
         if x is None or y is None:
             return
+
+        # Deduplicate by location within a 5s window — prevents double-collection
+        # when field_planner republishes the same goal before belief is updated.
+        now_sec = self.get_clock().now().nanoseconds / 1e9
+        loc_key = (round(x, 1), round(y, 1))
+        if now_sec - self._recent_collection_locations.get(loc_key, 0.0) < 5.0:
+            self.get_logger().info(
+                f'Duplicate collection at ({x:.2f}, {y:.2f}) within 5s — skipping'
+            )
+            return
+        self._recent_collection_locations[loc_key] = now_sec
+
+        # Mark the nearest cluster as exhausted so respawn skips it.
+        for i, cluster in enumerate(CLUSTER_SEED_POSITIONS):
+            dist = math.sqrt((x - cluster['x']) ** 2 + (y - cluster['y']) ** 2)
+            if dist < CELL_SIZE and i not in self._exhausted_clusters:
+                self._exhausted_clusters.add(i)
+                self.get_logger().info(
+                    f'Cluster {i} ({cluster["x"]}, {cluster["y"]}) exhausted '
+                    f'— will not respawn particles there'
+                )
 
         count = max(1, int(event.get('count', 1)))
         self._add_material_evidence_from_event(event)
@@ -579,7 +665,6 @@ class DebrisPredictionNode(Node):
             'prediction_drift_enabled': self.prediction_drift_enabled,
             'prediction_drift_scale': self.prediction_drift_scale,
             'density_cells': density_cells,
-            # Compatibility alias for the current field planner and preview.
             'cells': density_cells,
             'clusters_remaining': counts['active'],
         })

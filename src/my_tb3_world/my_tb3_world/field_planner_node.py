@@ -22,7 +22,6 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 
@@ -78,12 +77,10 @@ class FieldPlannerNode(Node):
         self.create_subscription(String, '/debris_density_map', self._density_map_cb, 10)
         self.create_subscription(String, '/collection_event', self._collection_cb, 10)
 
-        goal_qos = QoSProfile(
-            depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-        )
-        self.goal_pub = self.create_publisher(String, '/next_cell_goal', goal_qos)
+        # VOLATILE QoS — must match mission_planner_node subscription.
+        # TRANSIENT_LOCAL publisher is incompatible with VOLATILE subscriber in
+        # FastDDS (ROS 2 Jazzy default): topic becomes invisible, zero delivery.
+        self.goal_pub = self.create_publisher(String, '/next_cell_goal', 10)
 
         rate = float(self.get_parameter('plan_rate_hz').value)
         self.create_timer(1.0 / rate, self._plan)
