@@ -1,7 +1,7 @@
 image: arena_map.pgm
 mode: trinary
 resolution: 0.050
-origin: [-2.467, -2.758, 0]
+origin: [-2.348, -2.453, 0]
 negate: 0
 occupied_thresh: 0.65
 free_thresh: 0.196

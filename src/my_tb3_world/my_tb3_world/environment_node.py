@@ -2,10 +2,12 @@
 
 import json
 import math
+import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
@@ -32,7 +34,7 @@ COLLECTION_RADIUS_M = 0.2
 PHYSICAL_DEBRIS_COUNT = 100
 DEBRIS_DRIFT_SCALE = 0.015
 MAX_RECENT_EVENTS = 30
-RESET_COLLECTION_GRACE_SEC = 8.0
+RESET_COLLECTION_GRACE_SEC = 30.0
 
 
 class EnvironmentNode(Node):
@@ -45,10 +47,11 @@ class EnvironmentNode(Node):
         self.declare_parameter('debris_drift_scale', DEBRIS_DRIFT_SCALE)
         self.declare_parameter('physical_debris_seed', 23)
         self.declare_parameter('proximity_collection_enabled', False)
+        self.declare_parameter('collection_radius_m', COLLECTION_RADIUS_M)
         declare_debris_motion_parameters(self)
 
         self.cell_size = self.get_parameter('cell_size_m').value
-        self.collection_radius = COLLECTION_RADIUS_M
+        self.collection_radius = float(self.get_parameter('collection_radius_m').value)
         self.debris_drift_enabled = self.get_parameter('debris_drift_enabled').value
         self.debris_drift_scale = self.get_parameter('debris_drift_scale').value
         self.proximity_collection_enabled = self.get_parameter('proximity_collection_enabled').value
@@ -57,7 +60,12 @@ class EnvironmentNode(Node):
         self.material_response, self.boid_rules = debris_motion_from_parameters(self)
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)
+        amcl_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.create_subscription(Odometry, '/odom', self._odom_cb, qos)
+        self.create_subscription(
+            PoseWithCovarianceStamped, '/amcl_pose', self._amcl_pose_cb, amcl_qos
+        )
+        self.create_subscription(String, '/goal_reached', self._goal_reached_cb, 10)
         self.create_subscription(String, '/debug_reset', self._debug_reset_cb, 10)
 
         self.env_pub = self.create_publisher(String, '/environment_observation', 10)
@@ -74,12 +82,15 @@ class EnvironmentNode(Node):
         self.robot_x = 0.0
         self.robot_y = 0.0
         self.pose_received = False
+        self._map_x = 0.0
+        self._map_y = 0.0
+        self._has_amcl = False
 
         self._field_cells = build_environment_cells(None, self.cell_size)
         self._next_particle_index = 1
         self._event_counts = {'collected': 0, 'washed_out': 0, 'respawned': 0}
         self._recent_events = []
-        self._collection_resume_time = self._field_time_sec() + RESET_COLLECTION_GRACE_SEC
+        self._collection_resume_monotonic = time.monotonic() + RESET_COLLECTION_GRACE_SEC
         self.particles = self._new_physical_particles(self.physical_debris_count)
         self._env_cells = observation_cells(self._field_cells)
         self._env_source = 'preset_fallback'
@@ -113,7 +124,7 @@ class EnvironmentNode(Node):
         self.pose_received = False
         self.robot_x = 0.0
         self.robot_y = 0.0
-        self._collection_resume_time = self._field_time_sec() + RESET_COLLECTION_GRACE_SEC
+        self._collection_resume_monotonic = time.monotonic() + RESET_COLLECTION_GRACE_SEC
         self.get_logger().info('Physical debris particles reset')
 
     def _debug_reset_cb(self, msg: String):
@@ -148,16 +159,27 @@ class EnvironmentNode(Node):
         self.robot_y = msg.pose.pose.position.y
         self.pose_received = True
 
+    def _amcl_pose_cb(self, msg: PoseWithCovarianceStamped):
+        self._map_x = msg.pose.pose.position.x
+        self._map_y = msg.pose.pose.position.y
+        self._has_amcl = True
+
+    def _goal_reached_cb(self, msg: String):
+        if self.proximity_collection_enabled:
+            self._check_collections()
+
     def _check_collections(self):
-        if self._field_time_sec() < self._collection_resume_time:
+        if time.monotonic() < self._collection_resume_monotonic:
             return
+        rx = self._map_x if self._has_amcl else self.robot_x
+        ry = self._map_y if self._has_amcl else self.robot_y
         collected_particles = []
         for particle in self.particles:
             if particle['status'] != 'active':
                 continue
             dist = math.sqrt(
-                (self.robot_x - particle['x']) ** 2 +
-                (self.robot_y - particle['y']) ** 2
+                (rx - particle['x']) ** 2 +
+                (ry - particle['y']) ** 2
             )
             if dist <= self.collection_radius:
                 particle['status'] = 'collected'
@@ -383,10 +405,11 @@ class EnvironmentNode(Node):
             'debug_only': True,
             'robot': {
                 'pose': {
-                    'x': round(self.robot_x, 3),
-                    'y': round(self.robot_y, 3),
+                    'x': round(self._map_x if self._has_amcl else self.robot_x, 3),
+                    'y': round(self._map_y if self._has_amcl else self.robot_y, 3),
                 },
                 'pose_received': self.pose_received,
+                'has_amcl': self._has_amcl,
             },
             'collection_radius_m': self.collection_radius,
             'physical_debris': {

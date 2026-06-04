@@ -93,7 +93,7 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.1
-      movement_time_allowance: 45.0   # increased from 10s — SLAM replanning needs more time
+      movement_time_allowance: 20.0   # fail faster → trigger recovery sooner
     goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
@@ -155,7 +155,7 @@ local_costmap:
       plugins: ["obstacle_layer", "voxel_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.10
+        inflation_radius: 0.05
         cost_scaling_factor: 10.0
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -175,7 +175,7 @@ local_costmap:
         z_resolution: 0.05
         z_voxels: 16
         max_obstacle_height: 2.0
-        mark_threshold: 0
+        mark_threshold: 1
         observation_sources: scan
         scan:
           topic: /scan
@@ -225,7 +225,7 @@ global_costmap:
         z_resolution: 0.05
         z_voxels: 16
         max_obstacle_height: 2.0
-        mark_threshold: 0
+        mark_threshold: 1
         observation_sources: scan
         scan:
           topic: /scan
@@ -243,7 +243,7 @@ global_costmap:
         transform_tolerance: 0.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.10
+        inflation_radius: 0.05
         cost_scaling_factor: 10.0
       always_send_full_costmap: true
 
@@ -263,10 +263,19 @@ planner_server:
     expected_planner_frequency: 1.0
     planner_plugins: ["GridBased"]
     GridBased:
-      plugin: "nav2_navfn_planner::NavfnPlanner"
+      plugin: "nav2_smac_planner::SmacPlanner2D"
       tolerance: 0.5
-      use_astar: false
       allow_unknown: true
+      max_iterations: 1000000
+      max_on_approach_iterations: 1000
+      max_planning_time: 5.0
+      cost_travel_multiplier: 2.0
+      use_final_approach_orientation: false
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1e-10
 
 behavior_server:
   ros__parameters:

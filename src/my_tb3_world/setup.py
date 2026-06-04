@@ -39,6 +39,7 @@ setup(
             'base_reference_node = my_tb3_world.base_reference_node:main',
             'debris_prediction_node = my_tb3_world.debris_prediction_node:main',
             'field_planner_node = my_tb3_world.field_planner_node:main',
+            'debris_viz_node = my_tb3_world.debris_viz_node:main',
         ],
     },
 )

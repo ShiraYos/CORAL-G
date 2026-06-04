@@ -26,6 +26,7 @@ from std_msgs.msg import String
 
 
 _MAX_ARENA_DIST = math.sqrt(2) * 4.0  # diagonal of the 4×4 m arena
+ARENA_MARGIN_M = 0.5  # exclude density cells within 0.5m of any boundary wall
 
 
 class FieldPlannerNode(Node):
@@ -45,6 +46,8 @@ class FieldPlannerNode(Node):
         self.declare_parameter('min_goal_distance_m', 0.5)
         self.declare_parameter('republish_interval_sec', 10.0)
         self.declare_parameter('lock_timeout_sec', 130.0)
+        self.declare_parameter('goal_wall_clearance_cells', 1)
+        self.declare_parameter('map_cell_size_m', 0.5)
 
         self._fuel_thresh = float(self.get_parameter('fuel_return_threshold').value)
         self._storage_thresh = float(self.get_parameter('storage_return_threshold').value)
@@ -58,6 +61,8 @@ class FieldPlannerNode(Node):
         self._min_goal_distance = float(self.get_parameter('min_goal_distance_m').value)
         self._republish_interval = float(self.get_parameter('republish_interval_sec').value)
         self._lock_timeout_sec = float(self.get_parameter('lock_timeout_sec').value)
+        self._goal_wall_clearance_cells = int(self.get_parameter('goal_wall_clearance_cells').value)
+        self._map_cell_size_m = float(self.get_parameter('map_cell_size_m').value)
 
         self.twin_state = None
         self.density_map = None
@@ -67,15 +72,13 @@ class FieldPlannerNode(Node):
         self._last_target: tuple | None = None  # (x, y) for cleanup
         self._last_publish_time: float = 0.0
 
-        # Lock onto a target until collection confirms it was picked up.
-        # Uses position-based unlock since density cells carry no cluster_id.
+        # Lock onto a target until /goal_reached confirms arrival, or timeout.
         self._locked_target = None  # (cluster_id, x, y)
         self._lock_acquired_at = None   # time.monotonic() when lock was set
-        self._collected_ids: set = set()
 
         self.create_subscription(String, '/twin_state', self._twin_state_cb, 10)
         self.create_subscription(String, '/debris_density_map', self._density_map_cb, 10)
-        self.create_subscription(String, '/collection_event', self._collection_cb, 10)
+        self.create_subscription(String, '/goal_reached', self._goal_reached_cb, 10)
 
         # VOLATILE QoS — must match mission_planner_node subscription.
         # TRANSIENT_LOCAL publisher is incompatible with VOLATILE subscriber in
@@ -101,32 +104,25 @@ class FieldPlannerNode(Node):
         except json.JSONDecodeError:
             self.get_logger().error('Bad JSON on /debris_density_map')
 
-    def _collection_cb(self, msg: String):
+    def _goal_reached_cb(self, msg: String):
         try:
             event = json.loads(msg.data)
         except json.JSONDecodeError:
             return
-        cid = event.get('cluster_id')
-        if cid:
-            self._collected_ids.add(cid)
-            if self._locked_target and self._locked_target[0] == cid:
-                self.get_logger().info(f'Target {cid} collected — unlocking')
-                self._locked_target = None
-                self._lock_acquired_at = None
-                self._last_mode = None
-                self._last_target = None
-        elif self._locked_target is not None and self._locked_target[0] is None:
-            # Density cells carry no cluster_id — unlock by proximity to locked position
-            loc = event.get('location', {})
-            lx = loc.get('x', float('inf'))
-            ly = loc.get('y', float('inf'))
-            _, tx, ty = self._locked_target
-            if math.sqrt((lx - tx) ** 2 + (ly - ty) ** 2) < 1.0:
-                self.get_logger().info('Collection near locked target — unlocking')
-                self._locked_target = None
-                self._lock_acquired_at = None
-                self._last_mode = None
-                self._last_target = None
+        if self._locked_target is None:
+            return
+        goal = event.get('goal', {})
+        gx = goal.get('x', float('inf'))
+        gy = goal.get('y', float('inf'))
+        _, tx, ty = self._locked_target
+        if math.sqrt((gx - tx) ** 2 + (gy - ty) ** 2) < 1.0:
+            self.get_logger().info(
+                f'Goal reached near locked target ({tx:.2f}, {ty:.2f}) — unlocking'
+            )
+            self._locked_target = None
+            self._lock_acquired_at = None
+            self._last_mode = None
+            self._last_target = None
 
     # ── Planning ───────────────────────────────────────────────────────────────
 
@@ -163,11 +159,21 @@ class FieldPlannerNode(Node):
             for cell in cells
         }
 
-    def _is_allowed_density_cell(self, cell, map_lookup):
+    def _is_allowed_density_cell(self, cell, map_lookup, occupied_positions=None):
+        cx, cy = cell.get('x', 0.0), cell.get('y', 0.0)
+        if abs(cx) > 2.0 - ARENA_MARGIN_M or abs(cy) > 2.0 - ARENA_MARGIN_M:
+            return False
         if not map_lookup:
             return True
-        twin_cell = map_lookup.get((round(cell.get('x', 0.0), 3), round(cell.get('y', 0.0), 3)))
-        return bool(twin_cell and twin_cell.get('occupancy') == 'free')
+        twin_cell = map_lookup.get((round(cx, 3), round(cy, 3)))
+        if not (twin_cell and twin_cell.get('occupancy') == 'free'):
+            return False
+        if occupied_positions and self._goal_wall_clearance_cells > 0:
+            clearance_m = self._goal_wall_clearance_cells * self._map_cell_size_m
+            for ox, oy in occupied_positions:
+                if math.sqrt((cx - ox) ** 2 + (cy - oy) ** 2) <= clearance_m:
+                    return False
+        return True
 
     def _normalized_distance(self, ax, ay, bx, by):
         return min(math.sqrt((ax - bx) ** 2 + (ay - by) ** 2) / _MAX_ARENA_DIST, 1.0)
@@ -298,8 +304,12 @@ class FieldPlannerNode(Node):
             best_utility = -1.0
             best_score = None
             map_lookup = self._map_cell_lookup()
+            occupied_positions = {
+                (x, y) for (x, y), c in map_lookup.items()
+                if c.get('occupancy') != 'free'
+            }
             for cell in self._density_cells():
-                if not self._is_allowed_density_cell(cell, map_lookup):
+                if not self._is_allowed_density_cell(cell, map_lookup, occupied_positions):
                     continue
                 score = self._score_cell(
                     cell, robot_x, robot_y, base_x, base_y,

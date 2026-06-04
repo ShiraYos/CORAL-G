@@ -15,6 +15,11 @@ environment_node:
     debris_drift_enabled: true
     debris_drift_scale: 0.015
     physical_debris_seed: 23
+    # Proximity collection: environment_node fires /collection_event when the robot
+    # is within collection_radius_m of a physical particle. The /goal_reached event
+    # (from mission_planner_node after nav success) triggers an immediate proximity sweep.
+    proximity_collection_enabled: true
+    collection_radius_m: 0.35
 
 debris_prediction_node:
   ros__parameters:
@@ -22,10 +27,10 @@ debris_prediction_node:
     prediction_debris_count: 25
     simulation_horizon_sec: 60.0
     random_seed: 23
-    # Drift disabled: particles must stay near known cluster positions so the
-    # density map reliably points to actual debris. Enabling drift scatters
-    # particles across the arena within minutes, sending the robot to empty cells.
-    prediction_drift_enabled: false
+    # Drift re-enabled: prediction and physical particles share the same motion model
+    # and environment field, so they converge to the same vortex-attractor clusters
+    # within ~5 minutes. Density map reliably tracks actual debris locations.
+    prediction_drift_enabled: true
     prediction_drift_scale: 0.015
 
 field_planner_node:

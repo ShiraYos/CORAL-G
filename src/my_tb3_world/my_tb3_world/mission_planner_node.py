@@ -4,6 +4,8 @@ import json
 import math
 import time
 
+_RETURN_COOLDOWN_SEC = 25.0
+
 import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
@@ -33,26 +35,22 @@ class MissionPlannerNode(BasicNavigator):
         self.declare_parameter('initial_y', 0.0)
         self.declare_parameter('initial_yaw', 0.0)
         self.declare_parameter('localizer', 'slam_toolbox')  # 'amcl' when using pre-built map
-        self.declare_parameter('collection_radius_m', 0.2)
-        self.declare_parameter('default_collection_material', 'unknown')
 
         self.goal_timeout_sec = float(self.get_parameter('goal_timeout_sec').value)
-        self.collection_radius_m = float(self.get_parameter('collection_radius_m').value)
-        self.default_collection_material = self.get_parameter(
-            'default_collection_material'
-        ).value
         localizer = self.get_parameter('localizer').value
         self.active_goal_started_at = None
         self.goal_handle = None
         self._pending_goal = None
         self._active_goal_intent = None
+        self._send_in_flight = False
 
         self.twin_state = None
+        self._last_return_failed_at: float | None = None
 
         # VOLATILE QoS — matches field_planner_node publisher and ros2 topic pub
         self.create_subscription(String, '/next_cell_goal', self._goal_cb, 10)
         self.create_subscription(String, '/twin_state', self._twin_state_cb, 10)
-        self.collection_pub = self.create_publisher(String, '/collection_event', 10)
+        self.goal_reached_pub = self.create_publisher(String, '/goal_reached', 10)
 
         self._initial_pose = self._make_pose(
             float(self.get_parameter('initial_x').value),
@@ -87,6 +85,14 @@ class MissionPlannerNode(BasicNavigator):
             return
 
         if mode == 'return_to_base':
+            if (self._last_return_failed_at is not None and
+                    time.monotonic() - self._last_return_failed_at < _RETURN_COOLDOWN_SEC):
+                remaining = _RETURN_COOLDOWN_SEC - (time.monotonic() - self._last_return_failed_at)
+                self.get_logger().info(
+                    f'return_to_base cooldown active — {remaining:.0f}s remaining',
+                    throttle_duration_sec=10.0,
+                )
+                return
             try:
                 bx, by, byaw = self._base_from_twin()
             except (TypeError, ValueError):
@@ -128,7 +134,7 @@ class MissionPlannerNode(BasicNavigator):
         return 0.0, 0.0, 0.0
 
     def _navigate(self, mode, x, y, yaw):
-        if self.goal_handle is not None or self.active_goal_started_at is not None:
+        if self.goal_handle is not None or self.active_goal_started_at is not None or self._send_in_flight:
             self.get_logger().info(
                 f'Ignoring {mode} goal while Nav2 goal is active'
             )
@@ -149,6 +155,7 @@ class MissionPlannerNode(BasicNavigator):
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = self._make_pose(x, y, yaw)
 
+        self._send_in_flight = True
         send_future = self.nav_to_pose_client.send_goal_async(
             goal_msg,
             feedback_callback=None,
@@ -157,6 +164,7 @@ class MissionPlannerNode(BasicNavigator):
         self.get_logger().info(f'Sending goal: mode={mode} target=({x:.2f}, {y:.2f})')
 
     def _on_goal_accepted(self, future, mode, x, y):
+        self._send_in_flight = False
         goal_handle = future.result()
         if not goal_handle.accepted:
             self.get_logger().error(f'Goal rejected by Nav2: ({x:.2f}, {y:.2f})')
@@ -178,35 +186,37 @@ class MissionPlannerNode(BasicNavigator):
         result = future.result()
         if result.status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info('Goal succeeded')
+            self._last_return_failed_at = None
             if intent and intent.get('mode') == 'cleanup':
-                self._publish_collection_event(intent)
+                self._publish_goal_reached(intent)
         elif result.status == GoalStatus.STATUS_CANCELED:
             self.get_logger().info('Goal canceled')
         else:
             self.get_logger().warn(f'Goal failed (status={result.status})')
+            if intent and intent.get('mode') == 'return_to_base':
+                self._last_return_failed_at = time.monotonic()
+                self.get_logger().info(
+                    f'return_to_base failed — cooling down for {_RETURN_COOLDOWN_SEC:.0f}s'
+                )
 
-    def _publish_collection_event(self, intent):
-        material = str(self.default_collection_material or 'unknown')
+    def _publish_goal_reached(self, intent):
         event = {
-            'schema': 'dtas.collection_event.v1',
+            'schema': 'dtas.goal_reached.v1',
             'stamp': self._stamp(),
             'source': 'mission_planner_node',
-            'location': {
+            'mode': 'cleanup',
+            'goal': {
+                'frame_id': 'map',
                 'x': round(float(intent['x']), 3),
                 'y': round(float(intent['y']), 3),
             },
-            'count': 1,
-            'items': [{'type': material, 'count': 1}],
-            'materials': {material: 1},
-            'collection_radius_m': self.collection_radius_m,
-            'status': 'collected',
         }
         msg = String()
         msg.data = json.dumps(event)
-        self.collection_pub.publish(msg)
+        self.goal_reached_pub.publish(msg)
         self.get_logger().info(
-            f'Collection event after Nav2 success at '
-            f'({event["location"]["x"]:.2f}, {event["location"]["y"]:.2f})'
+            f'/goal_reached published for cleanup at '
+            f'({event["goal"]["x"]:.2f}, {event["goal"]["y"]:.2f})'
         )
 
     def _check_timeout(self):
