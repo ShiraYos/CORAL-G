@@ -16,6 +16,7 @@ setup(
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*.world')),
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*.sdf')),
         (os.path.join('share', package_name, 'params'), glob('params/*.yaml')),
+        (os.path.join('share', package_name, 'params'), glob('params/*.xml')),
         (os.path.join('share', package_name, 'maps'), glob('maps/*')),
     ],
     install_requires=['setuptools', 'opensimplex>=0.4.5'],

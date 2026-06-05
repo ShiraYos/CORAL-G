@@ -35,7 +35,7 @@ class FieldPlannerNode(Node):
 
         self.declare_parameter('plan_rate_hz', 0.5)
         self.declare_parameter('fuel_return_threshold', 0.25)
-        self.declare_parameter('storage_return_threshold', 0.8)
+        self.declare_parameter('storage_return_threshold', 1)
         self.declare_parameter('density_reward_weight', 1.0)
         self.declare_parameter('travel_cost_weight', 0.2)
         self.declare_parameter('storage_penalty_weight', 0.5)
@@ -45,7 +45,7 @@ class FieldPlannerNode(Node):
         self.declare_parameter('min_density_reward', 0.1)
         self.declare_parameter('min_goal_distance_m', 0.5)
         self.declare_parameter('republish_interval_sec', 10.0)
-        self.declare_parameter('lock_timeout_sec', 130.0)
+        self.declare_parameter('lock_timeout_sec', 60.0)
         self.declare_parameter('goal_wall_clearance_cells', 1)
         self.declare_parameter('map_cell_size_m', 0.5)
 
@@ -75,6 +75,7 @@ class FieldPlannerNode(Node):
         # Lock onto a target until /goal_reached confirms arrival, or timeout.
         self._locked_target = None  # (cluster_id, x, y)
         self._lock_acquired_at = None   # time.monotonic() when lock was set
+        self._failed_cells: set[tuple[float, float]] = set()
 
         self.create_subscription(String, '/twin_state', self._twin_state_cb, 10)
         self.create_subscription(String, '/debris_density_map', self._density_map_cb, 10)
@@ -161,6 +162,8 @@ class FieldPlannerNode(Node):
 
     def _is_allowed_density_cell(self, cell, map_lookup, occupied_positions=None):
         cx, cy = cell.get('x', 0.0), cell.get('y', 0.0)
+        if (round(cx, 1), round(cy, 1)) in self._failed_cells:
+            return False
         if abs(cx) > 2.0 - ARENA_MARGIN_M or abs(cy) > 2.0 - ARENA_MARGIN_M:
             return False
         if not map_lookup:
@@ -239,11 +242,29 @@ class FieldPlannerNode(Node):
         # or until lock_timeout_sec elapses (handles Nav2 failure/cancel with no
         # collection event — without this the planner freezes permanently).
         if self._locked_target is not None:
-            if (self._lock_acquired_at is not None and
+            _robot = self.twin_state.get('robot', {})
+            _needs_return = (
+                _robot.get('fuel_level', 1.0) < self._fuel_thresh or
+                _robot.get('storage_fill', 0.0) >= self._storage_thresh
+            )
+            if _needs_return:
+                self.get_logger().info(
+                    f'Return to base overrides cleanup lock '
+                    f'({self._locked_target[1]:.2f}, {self._locked_target[2]:.2f}) — releasing'
+                )
+                self._locked_target = None
+                self._lock_acquired_at = None
+                self._last_mode = None
+                self._last_target = None
+                # fall through to mode decision
+            elif (self._lock_acquired_at is not None and
                     time.monotonic() - self._lock_acquired_at > self._lock_timeout_sec):
+                fx, fy = round(self._locked_target[1], 1), round(self._locked_target[2], 1)
+                self._failed_cells.add((fx, fy))
                 self.get_logger().warn(
                     f'Goal lock timed out after {self._lock_timeout_sec:.0f}s — '
-                    f'force-unlocking ({self._locked_target[1]:.2f}, {self._locked_target[2]:.2f})'
+                    f'blacklisting ({fx:.1f}, {fy:.1f}), '
+                    f'total blacklisted: {len(self._failed_cells)}'
                 )
                 self._locked_target = None
                 self._lock_acquired_at = None
@@ -331,6 +352,13 @@ class FieldPlannerNode(Node):
                 target = (best_cell['x'], best_cell['y'])
                 self._locked_target = (best_cell.get('cluster_id'), target[0], target[1])
                 self._lock_acquired_at = time.monotonic()
+
+        # ── Clear blacklist after a successful base return ────────────────────
+        if self._last_mode == 'return_to_base' and mode == 'cleanup' and self._failed_cells:
+            self.get_logger().info(
+                f'Base return complete — clearing {len(self._failed_cells)} blacklisted cells'
+            )
+            self._failed_cells.clear()
 
         # ── Publish when decision changes OR republish interval has elapsed ──
 

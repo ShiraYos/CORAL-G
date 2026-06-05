@@ -4,12 +4,15 @@ import json
 import math
 import time
 
-_RETURN_COOLDOWN_SEC = 25.0
+_RETURN_COOLDOWN_SEC = 10.0
+_ESCAPE_TIMEOUT_SEC = 10.0
+_COMPUTE_PATH_START_OCCUPIED = 205  # nav2_msgs ComputePathToPose.START_OCCUPIED
 
 import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.srv import ClearEntireCostmap
 from nav2_simple_commander.robot_navigator import BasicNavigator
 from std_msgs.msg import String
 
@@ -30,7 +33,7 @@ class MissionPlannerNode(BasicNavigator):
     def __init__(self):
         super().__init__(node_name='mission_planner_node')
 
-        self.declare_parameter('goal_timeout_sec', 120.0)
+        self.declare_parameter('goal_timeout_sec', 60.0)
         self.declare_parameter('initial_x', 0.0)
         self.declare_parameter('initial_y', 0.0)
         self.declare_parameter('initial_yaw', 0.0)
@@ -46,6 +49,8 @@ class MissionPlannerNode(BasicNavigator):
 
         self.twin_state = None
         self._last_return_failed_at: float | None = None
+        self._start_occupied_escape_needed = False
+        self._escape_active = False
 
         # VOLATILE QoS — matches field_planner_node publisher and ros2 topic pub
         self.create_subscription(String, '/next_cell_goal', self._goal_cb, 10)
@@ -151,10 +156,23 @@ class MissionPlannerNode(BasicNavigator):
             return
         mode, x, y, yaw = self._pending_goal
         self._pending_goal = None
+        # Clear global costmap of stale phantoms before sending; _send_in_flight stays
+        # False during the clear so a more-important goal (e.g. return_to_base) can
+        # still arrive and supersede this one.
+        req = ClearEntireCostmap.Request()
+        future = self.clear_costmap_global_srv.call_async(req)
+        future.add_done_callback(lambda f: self._do_send_goal(mode, x, y, yaw))
 
+    def _do_send_goal(self, mode, x, y, yaw):
+        # A racing call may have already taken the slot (two clears fired in quick
+        # succession) — drop the stale one rather than double-sending.
+        if self._send_in_flight or self.goal_handle is not None:
+            self.get_logger().info(
+                f'Dropping stale {mode} goal ({x:.2f}, {y:.2f}) — newer goal already sent'
+            )
+            return
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = self._make_pose(x, y, yaw)
-
         self._send_in_flight = True
         send_future = self.nav_to_pose_client.send_goal_async(
             goal_msg,
@@ -184,20 +202,54 @@ class MissionPlannerNode(BasicNavigator):
         intent = self._active_goal_intent
         self._active_goal_intent = None
         result = future.result()
+        intent_mode = intent.get('mode') if intent else None
         if result.status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info('Goal succeeded')
             self._last_return_failed_at = None
-            if intent and intent.get('mode') == 'cleanup':
+            if intent_mode == 'escape':
+                self._escape_active = False
+                self.get_logger().info('[escape] complete — resuming normal planning')
+            elif intent_mode == 'cleanup':
                 self._publish_goal_reached(intent)
         elif result.status == GoalStatus.STATUS_CANCELED:
             self.get_logger().info('Goal canceled')
+            if intent_mode == 'escape':
+                self._escape_active = False
         else:
-            self.get_logger().warn(f'Goal failed (status={result.status})')
-            if intent and intent.get('mode') == 'return_to_base':
-                self._last_return_failed_at = time.monotonic()
-                self.get_logger().info(
-                    f'return_to_base failed — cooling down for {_RETURN_COOLDOWN_SEC:.0f}s'
+            error_code = getattr(result.result, 'error_code', 0)
+            if intent_mode == 'escape':
+                self._escape_active = False
+                if error_code == _COMPUTE_PATH_START_OCCUPIED:
+                    self.get_logger().warn(
+                        '[escape] escape goal itself hit START_OCCUPIED — '
+                        'clearing flag, resuming normal planning'
+                    )
+                else:
+                    self.get_logger().info(
+                        f'[escape] complete (failed, code={error_code}) — '
+                        'resuming normal planning'
+                    )
+            elif error_code == _COMPUTE_PATH_START_OCCUPIED:
+                pos = f'({intent["x"]:.2f}, {intent["y"]:.2f})' if intent else '(unknown)'
+                self.get_logger().warn(
+                    f'START_OCCUPIED (code={error_code}) at {pos} — '
+                    'scheduling escape to origin'
                 )
+                self._start_occupied_escape_needed = True
+            else:
+                self.get_logger().warn(f'Goal failed (status={result.status})')
+                if intent_mode == 'return_to_base':
+                    self._last_return_failed_at = time.monotonic()
+                    self.get_logger().info(
+                        f'return_to_base failed — cooling down for {_RETURN_COOLDOWN_SEC:.0f}s'
+                    )
+
+    def _send_escape_goal(self):
+        if self._escape_active or self.goal_handle is not None or self._send_in_flight:
+            return
+        self._escape_active = True
+        self.get_logger().info('[escape] sending escape goal to origin (0.0, 0.0)')
+        self._do_send_goal('escape', 0.0, 0.0, 0.0)
 
     def _publish_goal_reached(self, intent):
         event = {
@@ -220,14 +272,24 @@ class MissionPlannerNode(BasicNavigator):
         )
 
     def _check_timeout(self):
+        if self._start_occupied_escape_needed and not self._escape_active:
+            if self.goal_handle is None and not self._send_in_flight:
+                self._start_occupied_escape_needed = False
+                self._send_escape_goal()
+                return
         if self.active_goal_started_at is None or self.goal_handle is None:
             return
-        if time.monotonic() - self.active_goal_started_at > self.goal_timeout_sec:
-            self.get_logger().warn('Goal timed out — canceling')
+        timeout = _ESCAPE_TIMEOUT_SEC if self._escape_active else self.goal_timeout_sec
+        if time.monotonic() - self.active_goal_started_at > timeout:
+            label = '[escape] escape timed out' if self._escape_active else 'Goal timed out'
+            self.get_logger().warn(f'{label} — canceling')
             cancel_future = self.goal_handle.cancel_goal_async()
             cancel_future.add_done_callback(
                 lambda f: self.get_logger().info('Timeout cancel confirmed')
             )
+            if self._escape_active:
+                self._escape_active = False
+                self.get_logger().info('[escape] cleared after timeout — resuming normal planning')
             self.goal_handle = None
             self.active_goal_started_at = None
             self._active_goal_intent = None

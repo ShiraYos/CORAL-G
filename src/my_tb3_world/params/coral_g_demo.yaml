@@ -35,9 +35,9 @@ debris_prediction_node:
 
 field_planner_node:
   ros__parameters:
-    plan_rate_hz: 0.5
+    plan_rate_hz: 2.0
     fuel_return_threshold: 0.25
-    storage_return_threshold: 0.8
+    storage_return_threshold: 1
     density_reward_weight: 1.0
     travel_cost_weight: 0.2
     storage_penalty_weight: 0.5

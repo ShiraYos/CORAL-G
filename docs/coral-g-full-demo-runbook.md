@@ -175,7 +175,7 @@ ros2 launch my_tb3_world coral_g_full_demo.launch.py \
   min_density_reward:=0.001
 ```
 
-This starts Gazebo, TurtleBot3 spawn, SLAM/Nav2, CORAL-G nodes, and RViz.
+This starts Gazebo, TurtleBot3 spawn, AMCL/Nav2, CORAL-G nodes, and RViz.
 
 Start the dashboard in a second terminal from the source checkout:
 
@@ -198,12 +198,17 @@ Terminal 1, Gazebo world:
 ros2 launch my_tb3_world new_world.launch.py
 ```
 
-Terminal 2, SLAM/Nav2 and mission planner:
+Terminal 2, AMCL/Nav2 and mission planner:
 
 ```bash
-ros2 launch my_tb3_world nav2_slam_navigation.launch.py \
+ros2 launch my_tb3_world nav2_localization.launch.py \
+  map:=/ws/src/my_tb3_world/maps/arena_map.yaml \
   initial_x:=0.0 initial_y:=0.0 initial_yaw:=0.0
 ```
+
+> **Do NOT use `nav2_slam_navigation.launch.py`** — slam_toolbox in mapping mode
+> continuously updates the map from live scans, adding phantom obstacles to the
+> global costmap static layer and causing repeated navigation failures.
 
 Terminal 3, CORAL-G digital mission nodes:
 

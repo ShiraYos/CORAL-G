@@ -13,7 +13,11 @@ Launches all digital twin layer nodes:
 
 Run AFTER:
   1. new_world.launch.py           (Gazebo)
-  2. nav2_slam_navigation.launch.py (Nav2 + SLAM + mission_planner_node)
+  2. nav2_localization.launch.py   (Nav2 + AMCL + mission_planner_node)
+
+WARNING: Do NOT use nav2_slam_navigation.launch.py — slam_toolbox in mapping
+mode continuously updates the map from live scan data, permanently adding phantom
+obstacles to the global costmap static layer and degrading navigation quality.
 """
 
 import os
@@ -193,28 +197,28 @@ def generate_launch_description():
             }],
         ),
 
-        Node(
-            package='my_tb3_world',
-            executable='field_planner_node',
-            name='field_planner_node',
-            output='screen',
-            parameters=[demo_params_file, {
-                'use_sim_time': use_sim_time,
-                'plan_rate_hz': 1.0,
-                'republish_interval_sec': 5.0,
-                'fuel_return_threshold': 0.25,
-                'storage_return_threshold': 0.8,
-                'density_reward_weight': 1.0,
-                'travel_cost_weight': 0.2,
-                'storage_penalty_weight': 0.5,
-                'fuel_penalty_weight': 0.5,
-                'map_risk_weight': 0.5,
-                'return_reserve': 0.2,
-                'min_density_reward': min_density_reward,
-                'goal_wall_clearance_cells': 1,
-                'map_cell_size_m': 0.5,
-            }],
-        ),
+        # Node(
+        #     package='my_tb3_world',
+        #     executable='field_planner_node',
+        #     name='field_planner_node',
+        #     output='screen',
+        #     parameters=[demo_params_file, {
+        #         'use_sim_time': use_sim_time,
+        #         'plan_rate_hz': 2.0,
+        #         'republish_interval_sec': 5.0,
+        #         'fuel_return_threshold': 0.25,
+        #         'storage_return_threshold': 0.67,
+        #         'density_reward_weight': 1.0,
+        #         'travel_cost_weight': 0.2,
+        #         'storage_penalty_weight': 0.5,
+        #         'fuel_penalty_weight': 0.5,
+        #         'map_risk_weight': 0.5,
+        #         'return_reserve': 0.2,
+        #         'min_density_reward': min_density_reward,
+        #         'goal_wall_clearance_cells': 1,
+        #         'map_cell_size_m': 0.5,
+        #     }],
+        # ),
 
         Node(
             package='my_tb3_world',

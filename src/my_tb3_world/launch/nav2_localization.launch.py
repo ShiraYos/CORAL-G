@@ -85,7 +85,7 @@ def generate_launch_description():
         DeclareLaunchArgument('map',           default_value=default_map_file,
                               description='Full path to arena_map_lab.yaml'),
         DeclareLaunchArgument('params_file',   default_value=default_params_file),
-        DeclareLaunchArgument('goal_timeout_sec', default_value='120.0'),
+        DeclareLaunchArgument('goal_timeout_sec', default_value='45.0'),
         DeclareLaunchArgument('initial_x',     default_value='0.0'),
         DeclareLaunchArgument('initial_y',     default_value='0.0'),
         DeclareLaunchArgument('initial_yaw',   default_value='0.0'),

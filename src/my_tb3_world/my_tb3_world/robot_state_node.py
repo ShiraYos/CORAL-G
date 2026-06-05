@@ -15,8 +15,8 @@ class RobotStateNode(Node):
     def __init__(self):
         super().__init__('robot_state_node')
 
-        self.declare_parameter('storage_capacity_items', 3)
-        self.declare_parameter('fuel_drain_rate', 0.05)   # % per second
+        self.declare_parameter('storage_capacity_items', 8)
+        self.declare_parameter('fuel_drain_rate', 0.10)   # % per second
         self.declare_parameter('fuel_low_threshold', 20.0)
         self.declare_parameter('base_radius_m', 0.5)
 
