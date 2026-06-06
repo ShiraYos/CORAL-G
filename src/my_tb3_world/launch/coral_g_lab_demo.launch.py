@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """
-CORAL-G DTAS Node Launch File
-Launches all digital twin layer nodes:
-  - base_reference_node     — latches /base_pose from params (default: origin)
-  - robot_state_node        — tracks pose, fuel, storage from /odom + /collection_event
-  - environment_generator_node — provides map-aware current/wind/wave field service
-  - environment_node        — owns current physical debris truth, publishes env grid,
-                              detects waste collections, and emits /dashboard debug data
-  - digital_twin_state_node — merges all inputs into /twin_state
-  - debris_prediction_node  — publishes normalized debris density cells
-  - field_planner_node      — plans from density cells; publishes /next_cell_goal
+CORAL-G Lab Demo — CORAL-G nodes + safety stop
+For use with physical TurtleBot3 in lab environment.
 
-Run AFTER:
-  1. new_world.launch.py           (Gazebo)
-  2. nav2_localization.launch.py   (Nav2 + AMCL + mission_planner_node)
+Terminal structure for lab:
+  Terminal 1: (nothing — no Gazebo)
+  Terminal 2: ros2 launch my_tb3_world nav2_localization.launch.py \\
+                use_sim_time:=false \\
+                params_file:=/ws/src/my_tb3_world/params/nav2_params_lab.yaml \\
+                map:=/ws/src/my_tb3_world/maps/arena_map_lab.yaml
+  Terminal 3: ros2 launch my_tb3_world coral_g_lab_demo.launch.py
+  Terminal 4: ros2 run my_tb3_world field_planner_node --ros-args \\
+                -p use_sim_time:=false \\
+                -p min_density_reward:=0.001 \\
+                -p goal_wall_clearance_cells:=1 \\
+                -p map_cell_size_m:=0.5 \\
+                -p plan_rate_hz:=2.0 \\
+                -p republish_interval_sec:=2.0
+  Terminal 5: rviz2
 
-WARNING: Do NOT use nav2_slam_navigation.launch.py — slam_toolbox in mapping
-mode continuously updates the map from live scan data, permanently adding phantom
-obstacles to the global costmap static layer and degrading navigation quality.
+Prerequisites:
+  - ROS_DOMAIN_ID matching between laptop and robot
+  - Robot placed at map origin before launching Terminal 2
+  - nav2_params_lab.yaml: collision_monitor.cmd_vel_out_topic must be "cmd_vel_raw"
+    (safety_stop_node inserted between collision_monitor and the robot)
 """
 
 import os
@@ -37,7 +43,7 @@ def generate_launch_description():
         'coral_g_demo.yaml',
     )
 
-    use_sim_time = LaunchConfiguration('use_sim_time', default='true')
+    use_sim_time = LaunchConfiguration('use_sim_time', default='false')
     demo_params_file = LaunchConfiguration(
         'demo_params_file',
         default=default_demo_params_file,
@@ -60,8 +66,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'use_sim_time',
-            default_value='true',
-            description='Use simulation clock.',
+            default_value='false',
+            description='Use simulation clock (false for lab).',
         ),
         DeclareLaunchArgument(
             'demo_params_file',
@@ -198,29 +204,6 @@ def generate_launch_description():
             }],
         ),
 
-        # Node(
-        #     package='my_tb3_world',
-        #     executable='field_planner_node',
-        #     name='field_planner_node',
-        #     output='screen',
-        #     parameters=[demo_params_file, {
-        #         'use_sim_time': use_sim_time,
-        #         'plan_rate_hz': 2.0,
-        #         'republish_interval_sec': 5.0,
-        #         'fuel_return_threshold': 0.25,
-        #         'storage_return_threshold': 0.67,
-        #         'density_reward_weight': 1.0,
-        #         'travel_cost_weight': 0.2,
-        #         'storage_penalty_weight': 0.5,
-        #         'fuel_penalty_weight': 0.5,
-        #         'map_risk_weighwt': 0.5,
-        #         'return_reserve': 0.2,
-        #         'min_density_reward': min_density_reward,
-        #         'goal_wall_clearance_cells': 1,
-        #         'map_cell_size_m': 0.5,
-        #     }],
-        # ),
-
         Node(
             package='my_tb3_world',
             executable='debris_viz_node',
@@ -230,6 +213,21 @@ def generate_launch_description():
                 'use_sim_time': use_sim_time,
                 'publish_force_vectors': True,
                 'publish_density': True,
+            }],
+        ),
+
+        Node(
+            package='tb3_safety_stop',
+            executable='safety_stop_node',
+            name='safety_stop_node',
+            output='screen',
+            parameters=[{
+                'use_sim_time': False,
+                'stop_distance': 0.30,
+                'front_angle_deg': 30.0,
+                'scan_topic': '/scan',
+                'input_cmd_topic': '/cmd_vel_raw',
+                'output_cmd_topic': '/cmd_vel',
             }],
         ),
 

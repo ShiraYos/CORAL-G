@@ -37,7 +37,7 @@ class FieldPlannerNode(Node):
         self.declare_parameter('fuel_return_threshold', 0.25)
         self.declare_parameter('storage_return_threshold', 1)
         self.declare_parameter('density_reward_weight', 1.0)
-        self.declare_parameter('travel_cost_weight', 0.2)
+        self.declare_parameter('travel_cost_weight', 0.4)
         self.declare_parameter('storage_penalty_weight', 0.5)
         self.declare_parameter('fuel_penalty_weight', 0.5)
         self.declare_parameter('map_risk_weight', 0.5)
@@ -45,7 +45,7 @@ class FieldPlannerNode(Node):
         self.declare_parameter('min_density_reward', 0.1)
         self.declare_parameter('min_goal_distance_m', 0.5)
         self.declare_parameter('republish_interval_sec', 10.0)
-        self.declare_parameter('lock_timeout_sec', 60.0)
+        self.declare_parameter('lock_timeout_sec', 30.0)
         self.declare_parameter('goal_wall_clearance_cells', 1)
         self.declare_parameter('map_cell_size_m', 0.5)
 
@@ -75,7 +75,9 @@ class FieldPlannerNode(Node):
         # Lock onto a target until /goal_reached confirms arrival, or timeout.
         self._locked_target = None  # (cluster_id, x, y)
         self._lock_acquired_at = None   # time.monotonic() when lock was set
+        self._lock_timeout_dynamic: float = self._lock_timeout_sec  # per-goal, set at lock time
         self._failed_cells: set[tuple[float, float]] = set()
+        self._mission_complete_return_sent: bool = False
 
         self.create_subscription(String, '/twin_state', self._twin_state_cb, 10)
         self.create_subscription(String, '/debris_density_map', self._density_map_cb, 10)
@@ -258,18 +260,31 @@ class FieldPlannerNode(Node):
                 self._last_target = None
                 # fall through to mode decision
             elif (self._lock_acquired_at is not None and
-                    time.monotonic() - self._lock_acquired_at > self._lock_timeout_sec):
-                fx, fy = round(self._locked_target[1], 1), round(self._locked_target[2], 1)
-                self._failed_cells.add((fx, fy))
-                self.get_logger().warn(
-                    f'Goal lock timed out after {self._lock_timeout_sec:.0f}s — '
-                    f'blacklisting ({fx:.1f}, {fy:.1f}), '
-                    f'total blacklisted: {len(self._failed_cells)}'
-                )
-                self._locked_target = None
-                self._lock_acquired_at = None
-                self._last_mode = None
-                self._last_target = None
+                    time.monotonic() - self._lock_acquired_at > self._lock_timeout_dynamic):
+                tx, ty = self._locked_target[1], self._locked_target[2]
+                _robot = self.twin_state.get('robot', {})
+                robot_x = _robot.get('pose', {}).get('x', 0.0)
+                robot_y = _robot.get('pose', {}).get('y', 0.0)
+                robot_dist = math.sqrt((robot_x - tx) ** 2 + (robot_y - ty) ** 2)
+                if robot_dist < 0.35:
+                    self._lock_timeout_dynamic += 30.0
+                    self.get_logger().info(
+                        f'Robot within 0.35m of locked target ({tx:.2f}, {ty:.2f}) — '
+                        f'extending lock by 30s (new timeout={self._lock_timeout_dynamic:.0f}s)'
+                    )
+                    return  # hold lock — do NOT fall through to mode decision
+                else:
+                    fx, fy = round(tx, 1), round(ty, 1)
+                    self._failed_cells.add((fx, fy))
+                    self.get_logger().warn(
+                        f'Goal lock timed out after {self._lock_timeout_dynamic:.0f}s — '
+                        f'blacklisting ({fx:.1f}, {fy:.1f}), '
+                        f'total blacklisted: {len(self._failed_cells)}'
+                    )
+                    self._locked_target = None
+                    self._lock_acquired_at = None
+                    self._last_mode = None
+                    self._last_target = None
             else:
                 return
 
@@ -352,6 +367,18 @@ class FieldPlannerNode(Node):
                 target = (best_cell['x'], best_cell['y'])
                 self._locked_target = (best_cell.get('cluster_id'), target[0], target[1])
                 self._lock_acquired_at = time.monotonic()
+                self._mission_complete_return_sent = False
+                _lock_dist = math.sqrt(
+                    (target[0] - robot_x) ** 2 + (target[1] - robot_y) ** 2
+                )
+                self._lock_timeout_dynamic = max(
+                    self._lock_timeout_sec,
+                    min(60.0, (_lock_dist / 0.22) * 1.8 + 10.0),
+                )
+                self.get_logger().info(
+                    f'Goal locked ({target[0]:.2f}, {target[1]:.2f}) — '
+                    f'timeout={self._lock_timeout_dynamic:.0f}s (dist={_lock_dist:.2f}m)'
+                )
 
         # ── Clear blacklist after a successful base return ────────────────────
         if self._last_mode == 'return_to_base' and mode == 'cleanup' and self._failed_cells:
@@ -374,8 +401,32 @@ class FieldPlannerNode(Node):
         self._last_publish_time = now
 
         if mode == 'idle':
-            self.get_logger().info('Mission complete — no predicted debris mass, going idle')
-            self._publish({'mode': 'idle', 'status': 'idle'})
+            robot_at_base = robot.get('at_base', False)
+            if robot_at_base:
+                self.get_logger().info('Mission complete — robot at base')
+                self._publish({'mode': 'idle', 'status': 'idle'})
+            elif not self._mission_complete_return_sent:
+                self._mission_complete_return_sent = True
+                self.get_logger().info('Mission complete — returning to base to park')
+                self._publish({
+                    'status': 'active',
+                    'mode': 'return_to_base',
+                    'goal': {
+                        'frame_id': 'map',
+                        'x': base_x,
+                        'y': base_y,
+                        'yaw': base_yaw,
+                    },
+                    'utility': 0.0,
+                    'components': {},
+                    'return_feasible': True,
+                    'reason': 'mission complete',
+                })
+            else:
+                self.get_logger().info(
+                    'Mission complete — en route to base',
+                    throttle_duration_sec=10.0,
+                )
 
         elif mode == 'return_to_base':
             reason = 'fuel low' if fuel < self._fuel_thresh else 'storage full'

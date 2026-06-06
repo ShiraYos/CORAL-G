@@ -51,6 +51,8 @@ class MissionPlannerNode(BasicNavigator):
         self._last_return_failed_at: float | None = None
         self._start_occupied_escape_needed = False
         self._escape_active = False
+        self._costmap_clear_target: tuple | None = None
+        self._costmap_clear_deadline: float | None = None
 
         # VOLATILE QoS — matches field_planner_node publisher and ros2 topic pub
         self.create_subscription(String, '/next_cell_goal', self._goal_cb, 10)
@@ -159,9 +161,16 @@ class MissionPlannerNode(BasicNavigator):
         # Clear global costmap of stale phantoms before sending; _send_in_flight stays
         # False during the clear so a more-important goal (e.g. return_to_base) can
         # still arrive and supersede this one.
+        self._costmap_clear_target = (mode, x, y, yaw)
+        self._costmap_clear_deadline = time.monotonic() + 5.0
         req = ClearEntireCostmap.Request()
         future = self.clear_costmap_global_srv.call_async(req)
-        future.add_done_callback(lambda f: self._do_send_goal(mode, x, y, yaw))
+        future.add_done_callback(lambda f: self._on_costmap_cleared(mode, x, y, yaw))
+
+    def _on_costmap_cleared(self, mode, x, y, yaw):
+        self._costmap_clear_target = None
+        self._costmap_clear_deadline = None
+        self._do_send_goal(mode, x, y, yaw)
 
     def _do_send_goal(self, mode, x, y, yaw):
         # A racing call may have already taken the slot (two clears fired in quick
@@ -248,8 +257,14 @@ class MissionPlannerNode(BasicNavigator):
         if self._escape_active or self.goal_handle is not None or self._send_in_flight:
             return
         self._escape_active = True
-        self.get_logger().info('[escape] sending escape goal to origin (0.0, 0.0)')
-        self._do_send_goal('escape', 0.0, 0.0, 0.0)
+        try:
+            bx, by, byaw = self._base_from_twin()
+        except (TypeError, ValueError):
+            bx, by, byaw = 0.0, 0.0, 0.0
+        if self.twin_state is None:
+            self.get_logger().warn('[escape] twin_state not yet received — falling back to origin (0.0, 0.0)')
+        self.get_logger().info(f'[escape] sending escape goal to base ({bx:.2f}, {by:.2f})')
+        self._do_send_goal('escape', bx, by, byaw)
 
     def _publish_goal_reached(self, intent):
         event = {
@@ -272,6 +287,17 @@ class MissionPlannerNode(BasicNavigator):
         )
 
     def _check_timeout(self):
+        if (self._costmap_clear_deadline is not None and
+                time.monotonic() > self._costmap_clear_deadline):
+            target = self._costmap_clear_target
+            self._costmap_clear_target = None
+            self._costmap_clear_deadline = None
+            if target is not None:
+                self.get_logger().error(
+                    'Costmap clear service timed out — sending goal without clear'
+                )
+                self._do_send_goal(*target)
+            return
         if self._start_occupied_escape_needed and not self._escape_active:
             if self.goal_handle is None and not self._send_in_flight:
                 self._start_occupied_escape_needed = False

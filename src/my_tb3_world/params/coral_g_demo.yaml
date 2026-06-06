@@ -23,7 +23,7 @@ environment_node:
 
 debris_prediction_node:
   ros__parameters:
-    publish_rate_hz: 1.0
+    publish_rate_hz: 0.5
     prediction_debris_count: 25
     simulation_horizon_sec: 60.0
     random_seed: 23
@@ -33,13 +33,17 @@ debris_prediction_node:
     prediction_drift_enabled: true
     prediction_drift_scale: 0.015
 
+digital_twin_state_node:
+  ros__parameters:
+    cell_size_m: 0.5
+
 field_planner_node:
   ros__parameters:
     plan_rate_hz: 2.0
     fuel_return_threshold: 0.25
-    storage_return_threshold: 1
+    storage_return_threshold: 1.0
     density_reward_weight: 1.0
-    travel_cost_weight: 0.2
+    travel_cost_weight: 0.4
     storage_penalty_weight: 0.5
     fuel_penalty_weight: 0.5
     map_risk_weight: 0.5
