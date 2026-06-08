@@ -26,7 +26,7 @@ from std_msgs.msg import String
 
 
 _MAX_ARENA_DIST = math.sqrt(2) * 4.0  # diagonal of the 4×4 m arena
-ARENA_MARGIN_M = 0.5  # exclude density cells within 0.5m of any boundary wall
+ARENA_MARGIN_M = 0.0  # disabled — map-based occupancy + goal_wall_clearance_cells handles wall proximity
 
 
 class FieldPlannerNode(Node):
@@ -77,7 +77,10 @@ class FieldPlannerNode(Node):
         self._lock_acquired_at = None   # time.monotonic() when lock was set
         self._lock_timeout_dynamic: float = self._lock_timeout_sec  # per-goal, set at lock time
         self._failed_cells: set[tuple[float, float]] = set()
+        self._persistent_failed_cells: set[tuple[float, float]] = set()
+        self._blacklist_counts: dict[tuple[float, float], int] = {}
         self._mission_complete_return_sent: bool = False
+        self._lock_publish_count: int = 0   # retries for current lock; resets on new lock
 
         self.create_subscription(String, '/twin_state', self._twin_state_cb, 10)
         self.create_subscription(String, '/debris_density_map', self._density_map_cb, 10)
@@ -164,9 +167,10 @@ class FieldPlannerNode(Node):
 
     def _is_allowed_density_cell(self, cell, map_lookup, occupied_positions=None):
         cx, cy = cell.get('x', 0.0), cell.get('y', 0.0)
-        if (round(cx, 1), round(cy, 1)) in self._failed_cells:
+        key = (round(cx, 1), round(cy, 1))
+        if key in self._persistent_failed_cells or key in self._failed_cells:
             return False
-        if abs(cx) > 2.0 - ARENA_MARGIN_M or abs(cy) > 2.0 - ARENA_MARGIN_M:
+        if abs(cx) >= 2.0 - ARENA_MARGIN_M or abs(cy) >= 2.0 - ARENA_MARGIN_M:
             return False
         if not map_lookup:
             return True
@@ -275,10 +279,16 @@ class FieldPlannerNode(Node):
                     return  # hold lock — do NOT fall through to mode decision
                 else:
                     fx, fy = round(tx, 1), round(ty, 1)
-                    self._failed_cells.add((fx, fy))
+                    key = (fx, fy)
+                    self._failed_cells.add(key)
+                    self._blacklist_counts[key] = self._blacklist_counts.get(key, 0) + 1
+                    if self._blacklist_counts[key] >= 2:
+                        self._persistent_failed_cells.add(key)
                     self.get_logger().warn(
                         f'Goal lock timed out after {self._lock_timeout_dynamic:.0f}s — '
-                        f'blacklisting ({fx:.1f}, {fy:.1f}), '
+                        f'blacklisting ({fx:.1f}, {fy:.1f}) '
+                        f'(count={self._blacklist_counts[key]}'
+                        f'{", persistent" if key in self._persistent_failed_cells else ""}), '
                         f'total blacklisted: {len(self._failed_cells)}'
                     )
                     self._locked_target = None
@@ -286,6 +296,25 @@ class FieldPlannerNode(Node):
                     self._last_mode = None
                     self._last_target = None
             else:
+                now = self.get_clock().now().nanoseconds / 1e9
+                if (self._lock_publish_count < 3 and
+                        (now - self._last_publish_time) >= self._republish_interval):
+                    _, tx, ty = self._locked_target
+                    self._lock_publish_count += 1
+                    self._last_publish_time = now
+                    self.get_logger().info(
+                        f'Republishing locked cleanup goal ({tx:.2f}, {ty:.2f}) '
+                        f'(attempt {self._lock_publish_count}/3)',
+                    )
+                    self._publish({
+                        'status': 'selected',
+                        'mode': 'cleanup',
+                        'goal': {'frame_id': 'map', 'x': tx, 'y': ty, 'yaw': 0.0},
+                        'utility': 0.0,
+                        'components': {},
+                        'return_feasible': True,
+                        'reason': 'lock held — republishing for reliability',
+                    })
                 return
 
         robot = self.twin_state.get('robot', {})
@@ -360,14 +389,46 @@ class FieldPlannerNode(Node):
                     best_score = score
 
             if best_cell is None:
-                mode = 'idle'
-                target = None
+                any_blacklisted = bool(self._failed_cells) or bool(self._persistent_failed_cells)
+                if storage_fill > 0.0 or any_blacklisted:
+                    self.get_logger().warn(
+                        f'No valid cells '
+                        f'(blacklisted={len(self._failed_cells) + len(self._persistent_failed_cells)}, '
+                        f'storage={storage_fill:.2f}) — returning to base',
+                    )
+                    mode = 'return_to_base'
+                    target = (base_x, base_y)
+                    best_score = {
+                        'utility': 0.0,
+                        'return_feasible': True,
+                        'components': {
+                            'density_reward': 0.0,
+                            'travel_cost': 0.0,
+                            'storage_penalty': round(self._storage_weight * storage_fill, 3),
+                            'fuel_penalty': round(self._fuel_weight * max(0.0, 1.0 - fuel), 3),
+                            'map_risk': round(self._map_risk_weight * (1.0 - map_confidence), 3),
+                            'return_cost': round(
+                                self._normalized_distance(robot_x, robot_y, base_x, base_y), 3,
+                            ),
+                            'fuel_margin': round(fuel - self._return_reserve, 3),
+                        },
+                    }
+                    # fall through to publish block
+                else:
+                    # No scoreable cells and nothing to return — density map may be mid-update.
+                    # Only remaining_debris_mass == 0 should declare mission complete.
+                    self.get_logger().info(
+                        'No scoreable cells this tick — waiting for density update',
+                        throttle_duration_sec=5.0,
+                    )
+                    return
             else:
                 mode = 'cleanup'
                 target = (best_cell['x'], best_cell['y'])
                 self._locked_target = (best_cell.get('cluster_id'), target[0], target[1])
                 self._lock_acquired_at = time.monotonic()
                 self._mission_complete_return_sent = False
+                self._lock_publish_count = 1   # counts the initial publish about to fire
                 _lock_dist = math.sqrt(
                     (target[0] - robot_x) ** 2 + (target[1] - robot_y) ** 2
                 )
@@ -402,11 +463,16 @@ class FieldPlannerNode(Node):
 
         if mode == 'idle':
             robot_at_base = robot.get('at_base', False)
+            # Safety: if debris reappeared (particles respawned) while flag is set,
+            # clear it so cleanup can resume without waiting for a lock to form.
+            if robot_at_base and self._mission_complete_return_sent and remaining_debris_mass > 0:
+                self._mission_complete_return_sent = False
             if robot_at_base:
                 self.get_logger().info('Mission complete — robot at base')
                 self._publish({'mode': 'idle', 'status': 'idle'})
             elif not self._mission_complete_return_sent:
                 self._mission_complete_return_sent = True
+                self._last_mode = 'return_to_base'  # ensures blacklist clears on next cleanup
                 self.get_logger().info('Mission complete — returning to base to park')
                 self._publish({
                     'status': 'active',

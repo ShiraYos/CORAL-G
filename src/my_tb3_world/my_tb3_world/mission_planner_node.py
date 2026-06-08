@@ -51,6 +51,7 @@ class MissionPlannerNode(BasicNavigator):
         self._last_return_failed_at: float | None = None
         self._start_occupied_escape_needed = False
         self._escape_active = False
+        self._preemption_cancel_pending: bool = False
         self._costmap_clear_target: tuple | None = None
         self._costmap_clear_deadline: float | None = None
 
@@ -126,6 +127,17 @@ class MissionPlannerNode(BasicNavigator):
         else:
             self.get_logger().warn(f'Unknown mode: {mode!r} — ignoring')
             return
+
+        if (mode == 'return_to_base' and
+                self.goal_handle is not None and
+                self._active_goal_intent and
+                self._active_goal_intent.get('mode') == 'cleanup'):
+            self.get_logger().info('return_to_base preempting active cleanup goal — canceling')
+            self._preemption_cancel_pending = True
+            self.goal_handle.cancel_goal_async()
+            self.goal_handle = None
+            self.active_goal_started_at = None
+            self._active_goal_intent = None
 
         self._navigate(mode, bx, by, byaw)
 
@@ -224,6 +236,9 @@ class MissionPlannerNode(BasicNavigator):
             self.get_logger().info('Goal canceled')
             if intent_mode == 'escape':
                 self._escape_active = False
+            elif intent_mode == 'cleanup' and self._preemption_cancel_pending:
+                self._publish_goal_reached(intent)
+            self._preemption_cancel_pending = False
         else:
             error_code = getattr(result.result, 'error_code', 0)
             if intent_mode == 'escape':
