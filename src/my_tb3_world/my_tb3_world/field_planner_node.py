@@ -296,15 +296,21 @@ class FieldPlannerNode(Node):
                     self._last_mode = None
                     self._last_target = None
             else:
+                # FIX: removed the _lock_publish_count < 3 cap.
+                # The old 3-republish limit caused cells to be blacklisted without ever
+                # being navigated to: if mission_planner was still finishing a return_to_base
+                # when the lock was acquired, all 3 republishes would be ignored, and the
+                # lock would time out. Now we keep republishing every republish_interval_sec
+                # until goal_reached, lock timeout, or return_to_base override — mission_planner
+                # picks up the next republish within republish_interval_sec of becoming free.
                 now = self.get_clock().now().nanoseconds / 1e9
-                if (self._lock_publish_count < 3 and
-                        (now - self._last_publish_time) >= self._republish_interval):
+                if (now - self._last_publish_time) >= self._republish_interval:
                     _, tx, ty = self._locked_target
                     self._lock_publish_count += 1
                     self._last_publish_time = now
                     self.get_logger().info(
                         f'Republishing locked cleanup goal ({tx:.2f}, {ty:.2f}) '
-                        f'(attempt {self._lock_publish_count}/3)',
+                        f'(attempt {self._lock_publish_count})',
                     )
                     self._publish({
                         'status': 'selected',

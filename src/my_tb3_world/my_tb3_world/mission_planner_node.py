@@ -134,7 +134,12 @@ class MissionPlannerNode(BasicNavigator):
                 self._active_goal_intent.get('mode') == 'cleanup'):
             self.get_logger().info('return_to_base preempting active cleanup goal — canceling')
             self._preemption_cancel_pending = True
-            self.goal_handle.cancel_goal_async()
+            # Do NOT call cancel_goal_async() here. Sending the new goal while
+            # the old one is active causes bt_navigator to handle it as a
+            # preemption, producing exactly ONE ABORTED result for the old goal.
+            # Calling cancel explicitly produces a separate CANCELED result first,
+            # so _preemption_cancel_pending gets consumed by it and the subsequent
+            # ABORTED from the new goal triggers a false "return_to_base failed".
             self.goal_handle = None
             self.active_goal_started_at = None
             self._active_goal_intent = None
@@ -218,11 +223,23 @@ class MissionPlannerNode(BasicNavigator):
         self.get_logger().info(f'Goal accepted — navigating to ({x:.2f}, {y:.2f})')
 
     def _on_nav_result(self, future):
+        result = future.result()
+        # When return_to_base preempts a cleanup goal, Nav2 sends an ABORT for
+        # the old goal.  By the time this fires, _active_goal_intent already
+        # belongs to the NEW return_to_base goal.  Discarding here prevents the
+        # ABORT from being mis-read as a return_to_base failure and starting an
+        # unnecessary 10 s cooldown.
+        if (self._preemption_cancel_pending and
+                result.status != GoalStatus.STATUS_SUCCEEDED):
+            self._preemption_cancel_pending = False
+            self.get_logger().info(
+                f'Discarding stale preempted goal result (status={result.status})'
+            )
+            return
         self.goal_handle = None
         self.active_goal_started_at = None
         intent = self._active_goal_intent
         self._active_goal_intent = None
-        result = future.result()
         intent_mode = intent.get('mode') if intent else None
         if result.status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info('Goal succeeded')
@@ -331,9 +348,16 @@ class MissionPlannerNode(BasicNavigator):
             if self._escape_active:
                 self._escape_active = False
                 self.get_logger().info('[escape] cleared after timeout — resuming normal planning')
+            # FIX: save intent before clearing — field_planner_node holds a lock on this
+            # cleanup cell and will extend it forever if it never receives /goal_reached.
+            # The preemption-cancel path already does this correctly (line ~239); timeout
+            # cancels must do the same so the planner unlocks and picks a new target.
+            timed_out_intent = self._active_goal_intent
             self.goal_handle = None
             self.active_goal_started_at = None
             self._active_goal_intent = None
+            if timed_out_intent and timed_out_intent.get('mode') == 'cleanup':
+                self._publish_goal_reached(timed_out_intent)
 
     def _make_pose(self, x, y, yaw) -> PoseStamped:
         pose = PoseStamped()
