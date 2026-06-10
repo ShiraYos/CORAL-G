@@ -282,16 +282,65 @@ def environment_vector(controls, x=0.0, y=0.0, bounds=None, land=None):
 
 
 def map_bounds(map_msg):
-    origin_x = map_msg.info.origin.position.x
-    origin_y = map_msg.info.origin.position.y
     width_m = map_msg.info.width * map_msg.info.resolution
     height_m = map_msg.info.height * map_msg.info.resolution
+    corners = [
+        _map_to_world(map_msg, 0.0, 0.0),
+        _map_to_world(map_msg, width_m, 0.0),
+        _map_to_world(map_msg, 0.0, height_m),
+        _map_to_world(map_msg, width_m, height_m),
+    ]
+    xs = [corner[0] for corner in corners]
+    ys = [corner[1] for corner in corners]
     return {
-        'min_x': origin_x,
-        'min_y': origin_y,
-        'max_x': origin_x + width_m,
-        'max_y': origin_y + height_m,
+        'min_x': min(xs),
+        'min_y': min(ys),
+        'max_x': max(xs),
+        'max_y': max(ys),
     }
+
+
+def _map_origin(map_msg):
+    origin_x = map_msg.info.origin.position.x
+    origin_y = map_msg.info.origin.position.y
+    return origin_x, origin_y
+
+
+def _map_yaw(map_msg):
+    orientation = getattr(map_msg.info.origin, 'orientation', None)
+    if orientation is None:
+        return 0.0
+    x = getattr(orientation, 'x', 0.0)
+    y = getattr(orientation, 'y', 0.0)
+    z = getattr(orientation, 'z', 0.0)
+    w = getattr(orientation, 'w', 1.0)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
+def _map_to_world(map_msg, map_x, map_y):
+    origin_x, origin_y = _map_origin(map_msg)
+    yaw = _map_yaw(map_msg)
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    return (
+        origin_x + map_x * cos_yaw - map_y * sin_yaw,
+        origin_y + map_x * sin_yaw + map_y * cos_yaw,
+    )
+
+
+def _world_to_map(map_msg, world_x, world_y):
+    origin_x, origin_y = _map_origin(map_msg)
+    dx = world_x - origin_x
+    dy = world_y - origin_y
+    yaw = _map_yaw(map_msg)
+    cos_yaw = math.cos(yaw)
+    sin_yaw = math.sin(yaw)
+    return (
+        dx * cos_yaw + dy * sin_yaw,
+        -dx * sin_yaw + dy * cos_yaw,
+    )
 
 
 def fallback_bounds():
@@ -315,32 +364,73 @@ def simulation_cell_centers(bounds, cell_size_m=DEFAULT_CELL_SIZE):
 
 def occupancy_at(msg, x, y):
     resolution = msg.info.resolution
-    origin_x = msg.info.origin.position.x
-    origin_y = msg.info.origin.position.y
-    grid_x = int((x - origin_x) / resolution)
-    grid_y = int((y - origin_y) / resolution)
+    map_x, map_y = _world_to_map(msg, x, y)
+    grid_x = int(math.floor(map_x / resolution))
+    grid_y = int(math.floor(map_y / resolution))
 
     if not (0 <= grid_x < msg.info.width and 0 <= grid_y < msg.info.height):
         return 'unknown'
 
-    value = msg.data[grid_y * msg.info.width + grid_x]
-    if value == 0:
-        return 'free'
-    if value == -1:
+    return _occupancy_from_values([msg.data[grid_y * msg.info.width + grid_x]])
+
+
+def _occupancy_from_values(values):
+    saw_unknown = False
+    for value in values:
+        if value == -1:
+            saw_unknown = True
+        elif value != 0:
+            return 'blocked'
+    if saw_unknown:
         return 'unknown'
-    return 'blocked'
+    return 'free'
+
+
+def _coarse_cell_occupancy(msg, center_map_x, center_map_y, cell_size_m):
+    resolution = msg.info.resolution
+    min_map_x = center_map_x - cell_size_m / 2.0
+    max_map_x = center_map_x + cell_size_m / 2.0
+    min_map_y = center_map_y - cell_size_m / 2.0
+    max_map_y = center_map_y + cell_size_m / 2.0
+
+    start_x = max(0, int(math.floor(min_map_x / resolution)))
+    end_x = min(msg.info.width - 1, int(math.ceil(max_map_x / resolution)) - 1)
+    start_y = max(0, int(math.floor(min_map_y / resolution)))
+    end_y = min(msg.info.height - 1, int(math.ceil(max_map_y / resolution)) - 1)
+
+    if start_x > end_x or start_y > end_y:
+        return 'unknown'
+
+    values = []
+    for grid_y in range(start_y, end_y + 1):
+        row_offset = grid_y * msg.info.width
+        for grid_x in range(start_x, end_x + 1):
+            values.append(msg.data[row_offset + grid_x])
+    return _occupancy_from_values(values)
 
 
 def build_map_cells(map_msg, cell_size_m=DEFAULT_CELL_SIZE):
-    bounds = map_bounds(map_msg)
-    return [
-        {
-            'x': x,
-            'y': y,
-            'occupancy': occupancy_at(map_msg, x, y),
-        }
-        for x, y in simulation_cell_centers(bounds, cell_size_m)
-    ]
+    cells = []
+    width_m = map_msg.info.width * map_msg.info.resolution
+    height_m = map_msg.info.height * map_msg.info.resolution
+    center_map_x = cell_size_m / 2.0
+    while center_map_x < width_m:
+        center_map_y = cell_size_m / 2.0
+        while center_map_y < height_m:
+            x, y = _map_to_world(map_msg, center_map_x, center_map_y)
+            cells.append({
+                'x': round(x, 3),
+                'y': round(y, 3),
+                'occupancy': _coarse_cell_occupancy(
+                    map_msg,
+                    center_map_x,
+                    center_map_y,
+                    cell_size_m,
+                ),
+            })
+            center_map_y += cell_size_m
+        center_map_x += cell_size_m
+    return cells
 
 
 def build_environment_cells(map_msg=None, cell_size_m=DEFAULT_CELL_SIZE, controls=None):

@@ -239,6 +239,7 @@ class FakeOccupancyGrid:
         resolution=1.0,
         origin_x=-2.0,
         origin_y=-2.0,
+        origin_yaw=0.0,
         data=None,
     ):
         self.info = types.SimpleNamespace(
@@ -247,6 +248,12 @@ class FakeOccupancyGrid:
             resolution=resolution,
             origin=types.SimpleNamespace(
                 position=types.SimpleNamespace(x=origin_x, y=origin_y),
+                orientation=types.SimpleNamespace(
+                    x=0.0,
+                    y=0.0,
+                    z=math.sin(origin_yaw / 2.0),
+                    w=math.cos(origin_yaw / 2.0),
+                ),
             ),
         )
         self.data = data if data is not None else [0] * (width * height)
@@ -699,6 +706,50 @@ class MyTb3WorldNodeTests(unittest.TestCase):
         self.assertEqual(len(field_cells), 15)
         self.assertEqual(map_cells[0], {"x": -1.5, "y": -0.5, "occupancy": "free"})
         self.assertEqual(map_cells[-1], {"x": 2.5, "y": 1.5, "occupancy": "free"})
+
+    def test_environment_grid_blocks_coarse_cell_from_any_occupied_map_pixel(self):
+        module = importlib.import_module("my_tb3_world.environment_field")
+        grid = FakeOccupancyGrid(
+            width=4,
+            height=4,
+            resolution=0.5,
+            origin_x=0.0,
+            origin_y=0.0,
+            data=[
+                0, 0, 0, 0,
+                0, 100, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+            ],
+        )
+
+        map_cells = module.build_map_cells(grid, 1.0)
+
+        self.assertEqual(map_cells[0], {"x": 0.5, "y": 0.5, "occupancy": "blocked"})
+        self.assertEqual(map_cells[1], {"x": 0.5, "y": 1.5, "occupancy": "free"})
+
+    def test_environment_grid_respects_map_origin_yaw(self):
+        module = importlib.import_module("my_tb3_world.environment_field")
+        grid = FakeOccupancyGrid(
+            width=2,
+            height=1,
+            resolution=1.0,
+            origin_x=0.0,
+            origin_y=0.0,
+            origin_yaw=math.pi / 2.0,
+            data=[0, 100],
+        )
+
+        bounds = module.map_bounds(grid)
+        map_cells = module.build_map_cells(grid, 1.0)
+
+        self.assertAlmostEqual(bounds["min_x"], -1.0)
+        self.assertAlmostEqual(bounds["max_x"], 0.0)
+        self.assertAlmostEqual(bounds["min_y"], 0.0)
+        self.assertAlmostEqual(bounds["max_y"], 2.0)
+        self.assertAlmostEqual(map_cells[0]["x"], -0.5)
+        self.assertAlmostEqual(map_cells[0]["y"], 0.5)
+        self.assertEqual(module.occupancy_at(grid, -0.5, 1.5), "blocked")
 
     def test_physical_particle_seeding_is_deterministic(self):
         module = importlib.import_module("my_tb3_world.debris_particles")

@@ -3,8 +3,8 @@
 CORAL-G Lab Demo — Track A (Physical Robot + Gazebo Digital Twin)
 
 Identical to coral_g_lab_demo.launch.py except safety_stop_node is replaced
-by twin_safety_node, which monitors both the real robot (/scan) and the Gazebo
-twin (/sim/scan) and gates forward motion on both /cmd_vel and /sim/cmd_vel.
+by twin_safety_node, which gates forward motion from the real robot's /scan
+and publishes the safe command to both /cmd_vel and /sim/cmd_vel.
 
 Terminal structure for Track A lab session:
   Terminal 1 (SSH to robot):
@@ -19,9 +19,7 @@ Terminal structure for Track A lab session:
 
   Terminal 3 (laptop — Nav2 + AMCL):
       ros2 launch my_tb3_world nav2_localization.launch.py \\
-        use_sim_time:=false \\
-        params_file:=/ws/src/my_tb3_world/params/nav2_params_lab.yaml \\
-        map:=/ws/src/my_tb3_world/maps/arena_map_lab.yaml
+        use_sim_time:=false
 
   Terminal 4 (laptop — DTAS + twin safety):
       ros2 launch my_tb3_world coral_g_twin_demo.launch.py
@@ -50,9 +48,9 @@ How the connection works:
        → twin_safety_node   → /cmd_vel      (real physical robot moves)
                             → /sim/cmd_vel  (Gazebo twin mirrors movement)
 
-  Obstacle stop (bidirectional):
-    Real LIDAR  (/scan)     → twin_safety_node → blocks both if obstacle < stop_distance
-    Gazebo LIDAR (/sim/scan) → twin_safety_node → blocks both if obstacle < stop_distance
+  Obstacle stop:
+    Real LIDAR  (/scan) → twin_safety_node → blocks both if obstacle < stop_distance
+    Gazebo LIDAR (/sim/scan) is not used for stopping in this lab launch
 
 Demo evidence for checklist:
   Bidirectional pub/sub:
@@ -61,7 +59,7 @@ Demo evidence for checklist:
   State synchronization (non-motion):
     ros2 topic echo /twin_state   (fuel, storage, at_base all synced)
   Environmental interaction:
-    Place obstacle in real world OR in Gazebo → both robots stop
+    Place obstacle in real world → both real robot and Gazebo twin command stream stop
     ros2 topic echo /twin_state to confirm robot state reflects event
 """
 
@@ -210,10 +208,9 @@ def generate_launch_description():
 
         # ── Safety layer — CHANGED from coral_g_lab_demo ─────────────────────
         # twin_safety_node replaces safety_stop_node.
-        # It watches BOTH /scan (real robot) and /sim/scan (Gazebo twin).
-        # If either sees an obstacle within stop_distance, it zeros linear.x
-        # on BOTH /cmd_vel (real robot) and /sim/cmd_vel (Gazebo twin) while
-        # preserving angular.z so Nav2 can rotate out of the blocked heading.
+        # For the lab run, only the real /scan gates safety.  Gazebo still gets
+        # the safe mirrored command on /sim/cmd_vel, but /sim/scan cannot stop
+        # the physical robot if the Gazebo world differs from the saved map.
         Node(
             package='tb3_safety_stop',
             executable='twin_safety_node',
@@ -223,6 +220,7 @@ def generate_launch_description():
                 'use_sim_time': False,
                 'real_scan_topic':  '/scan',
                 'sim_scan_topic':   '/sim/scan',
+                'use_sim_scan_for_stop': False,
                 'input_cmd_topic':  '/cmd_vel_raw',
                 'real_cmd_topic':   '/cmd_vel',
                 'sim_cmd_topic':    '/sim/cmd_vel',

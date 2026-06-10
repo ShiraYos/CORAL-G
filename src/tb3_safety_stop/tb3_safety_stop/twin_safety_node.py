@@ -26,6 +26,7 @@ class TwinSafetyNode(Node):
        self.declare_parameter('sim_cmd_topic', '/sim/cmd_vel')
        self.declare_parameter('stop_distance', 0.35)
        self.declare_parameter('front_angle_deg', 30.0)
+       self.declare_parameter('use_sim_scan_for_stop', True)
 
        self.real_scan_topic = self.get_parameter('real_scan_topic').value
        self.sim_scan_topic = self.get_parameter('sim_scan_topic').value
@@ -34,6 +35,7 @@ class TwinSafetyNode(Node):
        self.sim_cmd_topic = self.get_parameter('sim_cmd_topic').value
        self.stop_distance = float(self.get_parameter('stop_distance').value)
        self.front_angle_deg = float(self.get_parameter('front_angle_deg').value)
+       self.use_sim_scan_for_stop = bool(self.get_parameter('use_sim_scan_for_stop').value)
 
        self.real_blocked = False
        self.sim_blocked = False
@@ -52,12 +54,13 @@ class TwinSafetyNode(Node):
            scan_qos
        )
 
-       self.create_subscription(
-           LaserScan,
-           self.sim_scan_topic,
-           self.sim_scan_cb,
-           scan_qos
-       )
+       if self.use_sim_scan_for_stop:
+           self.create_subscription(
+               LaserScan,
+               self.sim_scan_topic,
+               self.sim_scan_cb,
+               scan_qos
+           )
 
        self.create_subscription(
            TwistStamped,
@@ -69,7 +72,9 @@ class TwinSafetyNode(Node):
        self.real_pub = self.create_publisher(TwistStamped, self.real_cmd_topic, 10)
        self.sim_pub = self.create_publisher(TwistStamped, self.sim_cmd_topic, 10)
 
-       self.get_logger().info("Twin Safety Node started")
+       self.get_logger().info(
+           f"Twin Safety Node started (use_sim_scan_for_stop={self.use_sim_scan_for_stop})"
+       )
 
    def real_scan_cb(self, msg):
        self.real_min_distance, self.real_blocked = self.evaluate_front_obstacle(msg)
@@ -116,12 +121,13 @@ class TwinSafetyNode(Node):
        safe = TwistStamped()
        safe.header = msg.header
 
-       blocked = self.real_blocked or self.sim_blocked
+       blocked = self.real_blocked or (self.use_sim_scan_for_stop and self.sim_blocked)
        forward_requested = msg.twist.linear.x > 0.0
 
        self.get_logger().info(
            f"real_blocked={self.real_blocked} sim_blocked={self.sim_blocked} "
            f"real_min={self.real_min_distance:.2f} sim_min={self.sim_min_distance:.2f} "
+           f"use_sim_scan_for_stop={self.use_sim_scan_for_stop} "
            f"lin.x={msg.twist.linear.x:.2f} ang.z={msg.twist.angular.z:.2f}"
        )
 
@@ -135,7 +141,10 @@ class TwinSafetyNode(Node):
            # allow turning
            safe.twist.angular.z = msg.twist.angular.z
 
-           self.get_logger().warn("STOP: obstacle detected in real or sim front sector")
+           if self.real_blocked:
+               self.get_logger().warn("STOP: obstacle detected in real front sector")
+           else:
+               self.get_logger().warn("STOP: obstacle detected in sim front sector")
        else:
            safe = msg
 

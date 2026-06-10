@@ -6,9 +6,7 @@ For use with physical TurtleBot3 in lab environment.
 Terminal structure for lab:
   Terminal 1: (nothing — no Gazebo)
   Terminal 2: ros2 launch my_tb3_world nav2_localization.launch.py \\
-                use_sim_time:=false \\
-                params_file:=/ws/src/my_tb3_world/params/nav2_params_lab.yaml \\
-                map:=/ws/src/my_tb3_world/maps/arena_map_lab.yaml
+                use_sim_time:=false
   Terminal 3: ros2 launch my_tb3_world coral_g_lab_demo.launch.py
   Terminal 4: ros2 run my_tb3_world field_planner_node --ros-args \\
                 -p use_sim_time:=false \\

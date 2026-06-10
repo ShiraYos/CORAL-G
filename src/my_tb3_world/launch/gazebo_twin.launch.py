@@ -17,8 +17,10 @@ Topic isolation:
   Gazebo twin     /sim/scan  /sim/odom  /sim/cmd_vel  (from this launch)
 
 twin_safety_node (started by coral_g_twin_demo.launch.py):
-  reads  /scan + /sim/scan          obstacle check on both environments
-  writes /cmd_vel + /sim/cmd_vel    same command to both robots
+  reads  /scan                      physical safety gate
+  writes /cmd_vel + /sim/cmd_vel    same safe command to both robots
+  /sim/scan remains available for visualization/debugging, but the lab
+  launch does not let Gazebo geometry stop the physical robot.
 
 Nav2 / AMCL note:
   Only the physical robot runs Nav2 + AMCL (nav2_localization.launch.py,
@@ -31,12 +33,10 @@ Prerequisites:
   Gazebo must NOT already be running (this launch starts its own gz_sim).
 
 TF note:
-  robot_state_publisher for the sim robot runs inside PushRosNamespace('sim'),
-  so it publishes /sim/robot_description.  The physical robot's TF
-  (base_footprint, base_link, etc.) comes from the robot SBC over the network.
-  Both publish to the same TF frame names; in practice AMCL's continuous
-  /map→/odom update keeps navigation stable because it is authoritative.
-  If RViz shows a flickering robot model this is cosmetic only.
+  robot_state_publisher for the sim robot runs inside PushRosNamespace('sim')
+  with frame_prefix:=sim, so it publishes /sim/robot_description and sim/*
+  frame names.  TF is remapped into /sim/tf and /sim/tf_static so AMCL only
+  sees the physical robot's base_footprint, base_link, etc. on global /tf.
 """
 
 import os
@@ -45,9 +45,7 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import AppendEnvironmentVariable, GroupAction, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import PushRosNamespace
-from launch_ros.substitutions import FindPackageShare
-from launch.substitutions import PathJoinSubstitution
+from launch_ros.actions import PushRosNamespace, SetRemap
 
 
 def generate_launch_description():
@@ -90,18 +88,24 @@ def generate_launch_description():
     # GroupAction + PushRosNamespace prefixes every topic from the included
     # launches with /sim/:
     #   robot_state_publisher  →  /sim/robot_description
+    #   robot_state_publisher  →  /sim/tf with sim/* frame names
     #   ros_gz_bridge (scan)   →  /sim/scan
     #   ros_gz_bridge (cmd)    →  /sim/cmd_vel
     #   ros_gz_bridge (odom)   →  /sim/odom
     sim_robot_group = GroupAction([
         PushRosNamespace('sim'),
+        SetRemap(src='/tf', dst='tf'),
+        SetRemap(src='/tf_static', dst='tf_static'),
 
         # Publishes /sim/robot_description (needed by spawn_turtlebot3)
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(tb3_gazebo_share, 'launch', 'robot_state_publisher.launch.py')
             ),
-            launch_arguments={'use_sim_time': 'false'}.items(),
+            launch_arguments={
+                'use_sim_time': 'true',
+                'frame_prefix': 'sim',
+            }.items(),
         ),
 
         # Spawns the sim robot into Gazebo and sets up ROS-GZ bridges.
