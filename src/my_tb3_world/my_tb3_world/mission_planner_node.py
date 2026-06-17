@@ -64,6 +64,7 @@ class MissionPlannerNode(BasicNavigator):
             float(self.get_parameter('initial_x').value),
             float(self.get_parameter('initial_y').value),
             float(self.get_parameter('initial_yaw').value),
+            stamp_latest=True,
         )
         self.setInitialPose(self._initial_pose)
         self.get_logger().info(f'Waiting for Nav2 (localizer={localizer})...')
@@ -359,10 +360,14 @@ class MissionPlannerNode(BasicNavigator):
             if timed_out_intent and timed_out_intent.get('mode') == 'cleanup':
                 self._publish_goal_reached(timed_out_intent)
 
-    def _make_pose(self, x, y, yaw) -> PoseStamped:
+    def _make_pose(self, x, y, yaw, stamp_latest=False) -> PoseStamped:
         pose = PoseStamped()
         pose.header.frame_id = 'map'
-        pose.header.stamp = self.get_clock().now().to_msg()
+        if stamp_latest:
+            pose.header.stamp.sec = 0
+            pose.header.stamp.nanosec = 0
+        else:
+            pose.header.stamp = self.get_clock().now().to_msg()
         pose.pose.position.x = float(x)
         pose.pose.position.y = float(y)
         q = yaw_to_quaternion(yaw)

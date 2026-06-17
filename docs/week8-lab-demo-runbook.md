@@ -28,6 +28,15 @@ ros2 launch turtlebot3_bringup robot.launch.py
 
 ## Launch Order
 
+Map/world source of truth:
+
+- Gazebo twin loads the custom world: `src/my_tb3_world/worlds/new_world.world`.
+- Nav2 map_server publishes `/map` from: `src/my_tb3_world/maps/arena_map_lab.yaml`.
+- CORAL-G DT nodes subscribe to `/map`, so environment cells and blocked cells come
+  from the lab map, not from Gazebo geometry.
+- Gazebo `/sim/scan` remains available for viewing/debugging, but this lab launch
+  does not let it stop the physical robot.
+
 Terminal 1, Gazebo twin:
 
 ```bash
@@ -38,6 +47,18 @@ Terminal 2, Nav2 and AMCL with the lab map:
 
 ```bash
 ros2 launch my_tb3_world nav2_localization.launch.py use_sim_time:=false
+```
+
+The default AMCL initial pose is the Cartographer start pose, `(0.0, 0.0, 0.0)`.
+If the robot is physically started somewhere else in the saved map, launch with
+the matching map-frame pose:
+
+```bash
+ros2 launch my_tb3_world nav2_localization.launch.py \
+  use_sim_time:=false \
+  initial_x:=<map_x> \
+  initial_y:=<map_y> \
+  initial_yaw:=<yaw_radians>
 ```
 
 Check that `/map` exists before starting the digital twin layer:
@@ -69,6 +90,18 @@ Terminal 5, RViz:
 ```bash
 rviz2 -d src/my_tb3_world/rviz/coral_g.rviz
 ```
+
+Optional placement aid:
+
+```bash
+ros2 launch my_tb3_world cartographer_start_pose_marker.launch.py
+```
+
+RViz will show a disk and arrow named "Cartographer Start" at map-frame
+`(0.0, 0.0, 0.0)`.  Place the TurtleBot3 center on that disk and point the
+front of the robot in the arrow direction when using the default AMCL initial
+pose.  If you start somewhere else, pass that pose to
+`nav2_localization.launch.py` with `initial_x`, `initial_y`, and `initial_yaw`.
 
 Do not pass old `/ws/...` or `/root/...` paths. `nav2_localization.launch.py`
 defaults to the lab map and lab Nav2 params.

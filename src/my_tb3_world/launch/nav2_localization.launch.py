@@ -7,9 +7,16 @@ Save the map first (while SLAM is running):
   ros2 run nav2_map_server map_saver_cli -f src/my_tb3_world/maps/arena_map_lab
 
 Launch order:
-  1. new_world.launch.py           — Gazebo
-  2. nav2_localization.launch.py   — map server + AMCL + Nav2 + mission planner
-  3. coral_g_nodes.launch.py       — DTAS nodes
+  1. robot.launch.py on the TurtleBot3, plus optional gazebo_twin.launch.py
+     if showing the custom Gazebo world
+  2. nav2_localization.launch.py   — publishes /map from arena_map_lab.yaml,
+                                      then starts AMCL + Nav2 + mission planner
+  3. coral_g_twin_demo.launch.py   — DTAS nodes + twin safety for Option A
+
+Source of truth:
+  Nav2 and the DT nodes consume /map from arena_map_lab.yaml.  Gazebo loads
+  new_world.world for the visual twin, but Gazebo geometry is not used as the
+  navigation map.
 """
 import os
 
@@ -19,6 +26,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, Time
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from nav2_common.launch import RewrittenYaml
 
 
 def generate_launch_description():
@@ -37,6 +45,17 @@ def generate_launch_description():
     initial_x        = LaunchConfiguration('initial_x',        default='0.0')
     initial_y        = LaunchConfiguration('initial_y',        default='0.0')
     initial_yaw      = LaunchConfiguration('initial_yaw',      default='0.0')
+    configured_params_file = RewrittenYaml(
+        source_file=params_file,
+        param_rewrites={
+            'amcl.ros__parameters.set_initial_pose': 'true',
+            'amcl.ros__parameters.always_reset_initial_pose': 'true',
+            'amcl.ros__parameters.initial_pose.x': initial_x,
+            'amcl.ros__parameters.initial_pose.y': initial_y,
+            'amcl.ros__parameters.initial_pose.yaw': initial_yaw,
+        },
+        convert_types=True,
+    )
 
     # map_server + AMCL (localization_launch handles the lifecycle manager too)
     localization = IncludeLaunchDescription(
@@ -47,7 +66,7 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'autostart':    autostart,
             'map':          map_file,
-            'params_file':  params_file,
+            'params_file':  configured_params_file,
         }.items(),
     )
 
@@ -59,7 +78,7 @@ def generate_launch_description():
         launch_arguments={
             'use_sim_time': use_sim_time,
             'autostart':    autostart,
-            'params_file':  params_file,
+            'params_file':  configured_params_file,
         }.items(),
     )
 
@@ -86,9 +105,21 @@ def generate_launch_description():
                               description='Full path to arena_map_lab.yaml'),
         DeclareLaunchArgument('params_file',   default_value=default_params_file),
         DeclareLaunchArgument('goal_timeout_sec', default_value='60.0'),
-        DeclareLaunchArgument('initial_x',     default_value='0.0'),
-        DeclareLaunchArgument('initial_y',     default_value='0.0'),
-        DeclareLaunchArgument('initial_yaw',   default_value='0.0'),
+        DeclareLaunchArgument(
+            'initial_x',
+            default_value='0.0',
+            description='Initial AMCL/map-frame x. Use the Cartographer start pose by default.',
+        ),
+        DeclareLaunchArgument(
+            'initial_y',
+            default_value='0.0',
+            description='Initial AMCL/map-frame y. Use the Cartographer start pose by default.',
+        ),
+        DeclareLaunchArgument(
+            'initial_yaw',
+            default_value='0.0',
+            description='Initial AMCL yaw in radians.',
+        ),
 
         localization,
         TimerAction(period=5.0,  actions=[navigation]),

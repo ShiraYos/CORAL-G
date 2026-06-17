@@ -14,7 +14,8 @@ def generate_launch_description():
                {'input_cmd_topic': '/cmd_vel_raw'},
                {'real_cmd_topic': '/cmd_vel'},
                {'sim_cmd_topic': '/sim/cmd_vel'},
-               {'stop_distance': 0.45},
+               {'stop_distance': 0.25},
+               {'front_angle_deg': 12.0},
            ]
        )
    ])

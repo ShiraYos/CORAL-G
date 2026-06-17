@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """
 CORAL-G Lab Demo — CORAL-G nodes + safety stop
-For use with physical TurtleBot3 in lab environment.
+For use with the physical TurtleBot3 only.
+
+Map hook:
+  nav2_localization.launch.py publishes /map from arena_map_lab.yaml.
+  environment_generator_node and digital_twin_state_node subscribe to /map, so
+  the lab map remains the source of truth for DT cells and blocked areas.
+
+Gazebo note:
+  This launch does not start or mirror Gazebo.  For Option A with the custom
+  Gazebo world visible, run gazebo_twin.launch.py and coral_g_twin_demo.launch.py
+  instead.
 
 Terminal structure for lab:
   Terminal 1: (nothing — no Gazebo)
@@ -221,8 +231,8 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'use_sim_time': False,
-                'stop_distance': 0.30,
-                'front_angle_deg': 30.0,
+                'stop_distance': 0.25,
+                'front_angle_deg': 12.0,
                 'scan_topic': '/scan',
                 'input_cmd_topic': '/cmd_vel_raw',
                 'output_cmd_topic': '/cmd_vel',
